@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.jpg" alt="litekvd" width="420">
+</p>
+
 # litekvd
 
 **litekvd serves a key-value store over HTTP.** It is one binary with no dependencies
