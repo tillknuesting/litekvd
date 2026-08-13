@@ -192,3 +192,34 @@ func TestALeaderPodThatIsGoneIsAFailover(t *testing.T) {
 		t.Errorf("it picked %s, but lk-replica-0 had applied more", best.pod.Metadata.Name)
 	}
 }
+
+// TestAWriteTargetThatIsFollowingIsPromoted.
+//
+// A promoted node whose pod restarts comes back with its -leader still pointing
+// at the write Service, which by then names itself. It follows itself and
+// refuses every write with 409 while looking perfectly healthy — a write outage
+// with nothing unhealthy in it.
+//
+// litekvd refuses to serve replication to itself, so the store survives that;
+// this is the other half, which puts the role back. Found on a cluster, after
+// the version without it left a healthy pod refusing writes indefinitely.
+func TestAWriteTargetThatIsFollowingIsPromoted(t *testing.T) {
+	c := &controller{log: quiet(), grace: 15e9, leaseDuration: 15e9, dryRun: true}
+
+	following := &status{Role: "replica", Term: 1, AppliedSeq: 9, WaitFor: 1,
+		Leader: "http://lk-litekvd-leader:8080"}
+	nodes := []node{
+		{pod: ready("lk-litekvd-replica-0"), status: following},
+		{pod: ready("lk-litekvd-replica-1"), status: at(1, 9)},
+	}
+
+	// It must not be read as an unreachable leader: the node is answering, and
+	// waiting out a grace period would be waiting for something that is never
+	// going to change on its own.
+	if err := c.decide(t.Context(), nodes, "lk-litekvd-replica-0"); err != nil {
+		t.Fatal(err)
+	}
+	if !c.unreachableSince.IsZero() {
+		t.Error("a write target that is following was treated as unreachable")
+	}
+}

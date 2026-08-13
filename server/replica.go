@@ -374,6 +374,32 @@ func (s *Server) spooled() (*os.File, int64, litekv.DBPosition, func(), error) {
 // after that there is no status left to send and the only thing a failure can
 // do is end the stream.
 func (s *Server) streamReplica(w http.ResponseWriter, r *http.Request) {
+	// A node that is following does not serve replication, and this is not a
+	// tidiness rule — it is what stops a store destroying itself.
+	//
+	// Point a node's -leader at a Service whose selector has come round to name
+	// that same node, which is what a promoted replica does the moment its pod
+	// restarts, and it follows itself. It asks itself for what comes after its
+	// position, decides it has diverged from itself, and takes a snapshot of
+	// itself — and ApplySnapshot resets the store before it reads, so it empties
+	// itself and then applies the empty thing it just became. Everything
+	// following it is emptied next.
+	//
+	// That was found on a real cluster: a node that started with keys=1 logs=2
+	// and reported keys=0 a second later, and a follower behind it that lost the
+	// same records without a single error anywhere. Nothing in the engine can
+	// refuse it — a follower asked for records and a leader gave them — so it is
+	// refused here, where the node knows which of the two it is.
+	//
+	// It costs cascading replication, which was never a supported topology: a
+	// follower is a whole copy of a leader, and there is no chaining in the
+	// protocol to give up.
+	if leader, replica := s.following(); replica {
+		w.Header().Set(headerLeader, leader)
+		s.fail(w, r, errFollowing)
+		return
+	}
+
 	from, err := positionOf(r.URL.Query().Get("from"))
 	if err != nil {
 		s.fail(w, r, err)

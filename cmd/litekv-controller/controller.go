@@ -216,6 +216,33 @@ func (c *controller) decide(ctx context.Context, nodes []node, pointedAt string)
 		leader.pod.Metadata.Name = pointedAt
 	}
 
+	// The node the write Service names is up, and is not a leader.
+	//
+	// That is a write outage with a healthy pod in the middle of it, and it has
+	// one cause worth knowing: a promoted node whose pod restarted comes back
+	// with its -leader still pointing at the Service, which now names itself.
+	// It follows itself, refuses every write with 409, and looks entirely well
+	// from outside. litekvd refuses to serve replication to itself so the store
+	// survives, but nothing puts the role back.
+	//
+	// The answer is to promote it rather than to fail over: the Service naming
+	// it is the statement that it should be the leader, and it holds the data.
+	if leader.status != nil && leader.status.Role != "leader" {
+		c.unreachableSince = time.Time{}
+		if c.dryRun {
+			c.log.Warn("would re-promote the write target, which is following instead of leading",
+				"pod", leader.pod.Metadata.Name, "following", leader.status.Leader)
+			return nil
+		}
+		c.log.Warn("the write target is following instead of leading; promoting it",
+			"pod", leader.pod.Metadata.Name, "following", leader.status.Leader,
+			"term", leader.status.Term)
+		if err := c.promote(ctx, leader.pod.Status.PodIP); err != nil {
+			return fmt.Errorf("re-promoting %s: %w", leader.pod.Metadata.Name, err)
+		}
+		return nil
+	}
+
 	if leader.status != nil && !leader.status.Fenced {
 		if !c.unreachableSince.IsZero() {
 			c.log.Info("the leader is answering again", "pod", leader.pod.Metadata.Name,

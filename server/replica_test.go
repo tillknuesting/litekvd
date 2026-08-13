@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -1833,5 +1834,55 @@ func TestAFollowerAppliesASnapshotAsItArrives(t *testing.T) {
 			t.Fatal("the snapshot never finished arriving")
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+// TestAFollowingNodeRefusesToServeReplication.
+//
+// This is the guard against a store destroying itself, and it was written after
+// a real cluster did exactly that.
+//
+// A promoted replica whose pod restarts comes back with its -leader still
+// pointing at the Service that now names *itself*. It then follows itself: asks
+// itself what comes after its position, concludes it has diverged from itself,
+// and takes a snapshot — and ApplySnapshot empties the store before it reads, so
+// the store empties itself and applies the nothing it has become. Every follower
+// behind it is emptied next, and no error is reported anywhere, because at each
+// step something asked for records and something else gave them.
+//
+// Nothing in the engine can refuse that: a leader was asked and answered. Only
+// the node that knows it is following can refuse, and this is it refusing.
+func TestAFollowingNodeRefusesToServeReplication(t *testing.T) {
+	up := serving(t, litekv.DBOptions{Sync: litekv.SyncNever})
+	if err := up.db.Write([]byte("k"), []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+
+	// A node following the one above. It has records and would happily hand
+	// them out, which is the problem.
+	s, db := newServer(t, Options{})
+	if err := s.Follow(up.srv.URL, FollowerOptions{Logger: quiet(),
+		MinBackoff: time.Millisecond, MaxBackoff: 20 * time.Millisecond}); err != nil {
+		t.Fatal(err)
+	}
+	waitForPositions(t, db, up.db, "the replica to catch up")
+
+	// On a bounded context, because a test that fails by hanging is worse than
+	// one that fails: without the guard this request is a replication stream
+	// that never ends, and the suite sits there until the whole run is killed.
+	// Two seconds is long enough for a refusal and short enough to be a
+	// failure rather than a hostage situation.
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, replicaPath+"?from=", nil).WithContext(ctx))
+
+	got := rec.Result()
+	if got.StatusCode != http.StatusConflict {
+		t.Fatalf("a following node served a replication stream: %d", got.StatusCode)
+	}
+	if where := got.Header.Get(headerLeader); where != up.srv.URL {
+		t.Errorf("it refused without saying where the leader is: %q", where)
 	}
 }

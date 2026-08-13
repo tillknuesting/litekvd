@@ -840,6 +840,11 @@ Read these before choosing this, not after.
 - **The empty key has no spelling in a path.** `/v1/keys/` is not a route. A batch line writes it
   and a range hands it back.
 - **A follower is a whole copy.** No partial replication, no filtering by key. The unit is the log.
+- **A replica will not serve replication.** `GET /v1/replica/stream` from a node that is following
+  answers 409 with `Litekv-Leader`. Cascading replication was never a supported topology, and the rule
+  is what stops a node whose `-leader` has come round to name itself from following itself — which
+  empties it, because a snapshot resets a store before it reads, and then empties everything behind
+  it. It is the only failure found here that lost data.
 - **One process owns a directory**, and on Windows, solaris, aix, plan9 and wasm nothing enforces
   that — the lock needs `flock`, which those platforms do not have in Go's standard library.
 - **Expiry is checked on read, not swept.** A store full of expired records is as large as a store

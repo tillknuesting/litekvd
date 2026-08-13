@@ -343,8 +343,35 @@ a short write outage rather than a failover.
 
 ## What testing found
 
-Three bugs, all in this chart rather than in litekvd, and none of them visible
-from `helm template`.
+Five bugs. Four were in this chart, one was in litekvd itself, and none of them
+was visible from `helm template` or from a unit test.
+
+**A node that follows itself destroys the data, and everything following it.**
+The worst thing found here by a distance, and it took a chaos run to reach.
+
+A promoted replica whose pod restarts comes back with its `-leader` still
+pointing at the write Service — which by then names itself. It asks itself what
+comes after its position, concludes it has diverged from itself, and takes a
+snapshot: and `ApplySnapshot` empties the store *before* it reads, so the node
+empties itself and applies the nothing it has become. Every follower behind it
+is emptied next. No error is reported anywhere, because at each step something
+asked for records and something else gave them.
+
+The cluster went from three nodes holding a key to two nodes holding zero, and
+the only surviving copy was on the node that had been failed away from.
+
+litekvd now **refuses to serve a replication stream from a node that is
+following**. Nothing in the engine could refuse it — a follower asked and a
+leader answered — so it is refused in the server, which is the layer that knows
+which of the two it is. Replaying the exact sequence afterwards: `keys=3` where
+it had been `keys=0`.
+
+That left the write path down, because the node was still a replica refusing
+writes while looking perfectly healthy. So the controller learned the other
+half: a write target that reports `role=replica` is re-promoted rather than
+failed away from — the Service naming it is the statement that it should lead,
+and it holds the data. Measured after the fix: promoted at term 2, writes back
+to 204, every key still there.
 
 **A promotion plus a returning old leader put two nodes in the write Service.**
 The worst of the three, and it took a second drill to find: promote a replica,
