@@ -35,6 +35,7 @@ every write is on the disk before it is acknowledged.
 | **Memory**          | every key held in memory, about 59 bytes each; values on the disk |
 | **Not provided**    | transactions across keys, secondary indexes, a query language, automatic failover |
 | **Build and run**   | Go 1.26 to build; no runtime dependencies                        |
+| **Stability**       | v1: the HTTP API and `litekvd/server` do not break without a `/v2` |
 | **Measured**        | 779 ns per write through the handler at ten concurrent writers, `-sync always`; 215 µs when waiting for a follower |
 
 **Contents** — [Install](#install) · [Sixty seconds](#sixty-seconds) ·
