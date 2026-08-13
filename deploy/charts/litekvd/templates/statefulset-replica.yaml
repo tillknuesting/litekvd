@@ -1,0 +1,55 @@
+{{- if gt (int .Values.replicas) 0 }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "litekvd.fullname" . }}-replica
+  labels:
+    {{- include "litekvd.labels" . | nindent 4 }}
+    litekv.io/role: replica
+spec:
+  replicas: {{ .Values.replicas }}
+  serviceName: {{ include "litekvd.fullname" . }}-headless
+  # Parallel, because a follower does not depend on the one before it. Ordered
+  # would make a replica that is slow to take its first snapshot hold up every
+  # replica behind it, and they are all following the same leader anyway.
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "litekvd.componentLabels" (dict "Chart" .Chart "Release" .Release "Values" .Values "component" "replica") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "litekvd.componentLabels" (dict "Chart" .Chart "Release" .Release "Values" .Values "component" "replica") | nindent 8 }}
+        # Mutable. Promoting this pod means setting it to leader, which moves
+        # the leader Service onto it without detaching it from this
+        # StatefulSet. A restart puts it back to replica, which is a fallback
+        # rather than a surprise — see the runbook.
+        litekv.io/role: replica
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if or .Values.podAnnotations (and .Values.auth.enabled (not .Values.auth.existingSecret)) }}
+      annotations:
+        {{- if and .Values.auth.enabled (not .Values.auth.existingSecret) }}
+        checksum/token: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+    spec:
+      {{- /* -wait-for on a replica does nothing while it is a replica, since a
+             replica refuses writes — and is exactly what is wanted the moment
+             one is promoted. Without it a failover silently drops from
+             semi-synchronous to asynchronous, which the drill in the README
+             caught by watching Litekv-Replicated disappear. */}}
+      {{- include "litekvd.podSpec" (dict "root" . "role" "replica" "extraArgs" (concat (list
+          (printf "-leader=http://%s-leader:%v" (include "litekvd.fullname" .) .Values.service.port)
+          (printf "-wait-for=%v" (.Values.config.waitFor | default 0))
+          (printf "-wait-timeout=%s" (.Values.config.waitTimeout | default "5s")))
+          (ternary (list (printf "-idle=%s" (.Values.config.idle | toString))) (list) (ne (.Values.config.idle | toString) ""))
+        )) | nindent 6 }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates: {{- include "litekvd.volumeClaim" . | nindent 4 }}
+  {{- end }}
+{{- end }}

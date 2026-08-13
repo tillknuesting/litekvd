@@ -1,0 +1,33 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "litekvd.fullname" . }}
+  labels:
+    {{- include "litekvd.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  # The headless Service, so that every pod is scraped separately rather than
+  # whichever one a load-balanced Service happened to pick. A leader's metrics
+  # and a replica's are different numbers and both are wanted.
+  selector:
+    matchLabels: {{- include "litekvd.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout }}
+      {{- if .Values.auth.enabled }}
+      # /metrics is behind the token; /health is the only route that is not.
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ include "litekvd.secretName" . }}
+          key: token
+      {{- end }}
+      relabelings:
+        - sourceLabels: [__meta_kubernetes_pod_label_litekv_io_role]
+          targetLabel: litekv_role
+{{- end }}

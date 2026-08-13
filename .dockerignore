@@ -1,0 +1,7 @@
+# The worker copies a mutation sweep makes, which are copies of this tree.
+.mutate/
+# The default -dir, if anybody has run the binary here.
+litekv-data/
+.git/
+docs/
+*.md

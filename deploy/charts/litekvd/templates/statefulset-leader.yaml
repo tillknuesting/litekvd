@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "litekvd.fullname" . }}
+  labels:
+    {{- include "litekvd.labels" . | nindent 4 }}
+    litekv.io/role: leader
+spec:
+  # One. Two leaders is two stores on the same term, which is the one thing
+  # this design says must never happen — so this is not a number to raise, and
+  # a second leader is a promotion rather than a scale.
+  replicas: 1
+  serviceName: {{ include "litekvd.fullname" . }}-headless
+  podManagementPolicy: OrderedReady
+  selector:
+    matchLabels:
+      {{- include "litekvd.componentLabels" (dict "Chart" .Chart "Release" .Release "Values" .Values "component" "leader") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "litekvd.componentLabels" (dict "Chart" .Chart "Release" .Release "Values" .Values "component" "leader") | nindent 8 }}
+        # Mutable, and the only thing the leader Service selects on. Moving it
+        # is a promotion; it is deliberately not in the selector above.
+        litekv.io/role: leader
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- if or .Values.podAnnotations (and .Values.auth.enabled (not .Values.auth.existingSecret)) }}
+      annotations:
+        {{- if and .Values.auth.enabled (not .Values.auth.existingSecret) }}
+        # Restart the pod when the token changes, since it is read once at
+        # startup and a Secret update would otherwise leave the running process
+        # on the old one.
+        checksum/token: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+    spec:
+      {{- include "litekvd.podSpec" (dict "root" . "role" "leader" "extraArgs" (list
+          (printf "-wait-for=%v" (.Values.config.waitFor | default 0))
+          (printf "-wait-timeout=%s" (.Values.config.waitTimeout | default "5s"))
+        )) | nindent 6 }}
+  {{- if .Values.persistence.enabled }}
+  volumeClaimTemplates: {{- include "litekvd.volumeClaim" . | nindent 4 }}
+  {{- end }}

@@ -163,6 +163,21 @@ address a stranger can reach.
 over the first one's log. The claim is a lock held for as long as the process lives, so a
 machine that lost power comes back and starts normally — there is nothing to clean up by hand.
 
+### Kubernetes
+
+There is a Helm chart in [`deploy/`](deploy/) — a leader, two replicas, one per
+node, with persistent volumes, a bearer token, PodDisruptionBudgets and an
+optional ServiceMonitor:
+
+```bash
+helm install lk deploy/charts/litekvd -n litekv --create-namespace
+```
+
+The container image is a `scratch` base with four files in it and comes to
+6.6 MB. [`deploy/README.md`](deploy/README.md) has the k3d development loop and
+the failover runbook — read that before you need it, because there is no
+automatic failover and promotion is deliberately a decision somebody makes.
+
 ### Running it as a service
 
 Copy-paste, on the machine that will run it. It builds the binary, makes a user for it,

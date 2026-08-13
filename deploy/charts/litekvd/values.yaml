@@ -1,0 +1,169 @@
+# litekvd: one leader that takes writes, and replicas that follow it.
+#
+# The shape is two StatefulSets rather than one, because litekvd has no
+# automatic failover and this chart does not pretend otherwise: which node is
+# the leader is a decision somebody makes, and a leader is therefore a distinct
+# workload rather than whichever pod happens to be ordinal zero. See the
+# promotion runbook in deploy/README.md.
+
+image:
+  repository: ghcr.io/tillknuesting/litekvd
+  # Empty takes the chart's appVersion. Pin a digest in production; a tag can
+  # be moved and a digest cannot.
+  tag: ""
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# How many followers. Two, plus the one leader, is three pods — which with the
+# topology spread below lands one on each of three nodes.
+replicas: 2
+
+service:
+  port: 8080
+  # The Service in front of the leader, which is where writes go. Its selector
+  # is the role label, so promoting a replica is a matter of moving that label
+  # rather than reinstalling anything.
+  type: ClusterIP
+  annotations: {}
+
+config:
+  # every batches the disk waits into one a second. always is the store's own
+  # default and waits on every write; never is for a cache you can lose.
+  sync: every
+  syncInterval: ""
+  segmentSize: ""
+  mergeTrigger: ""
+  maxValue: ""
+  maxBatch: ""
+  maxScan: ""
+  queue: ""
+  # Heartbeat from an idle leader, and how long a follower waits to hear one.
+  heartbeat: ""
+  idle: ""
+  shutdownTimeout: ""
+
+  # Semi-synchronous replication: how many followers must have a write before
+  # the leader acknowledges it. 0 is asynchronous and costs a write nothing.
+  #
+  # Setting this to 1 with replicas: 2 is the arrangement that survives losing
+  # the leader without losing an acknowledged write. What it costs is a round
+  # trip to a follower on every write — 8.3 µs becomes 215 µs on loopback — and
+  # what it cannot do is take a write back: a wait that runs out answers 202
+  # and the record stays. See the README.
+  waitFor: 0
+  waitTimeout: ""
+
+auth:
+  # A shared bearer token on every route except /health. There are no users and
+  # no scopes: anything that can read can also write.
+  enabled: false
+  # Left empty with auth.enabled, the chart generates one on first install and
+  # keeps it across upgrades. Read it with:
+  #   kubectl get secret <release>-litekvd-token -o jsonpath='{.data.token}' | base64 -d
+  token: ""
+  # Or bring your own Secret, which must have a "token" key.
+  existingSecret: ""
+
+persistence:
+  enabled: true
+  size: 8Gi
+  # Empty uses the cluster's default StorageClass. On k3d that is local-path,
+  # which pins a pod to the node its data is on — fine for development and a
+  # thing to know before believing a failover drill on it.
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  annotations: {}
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    # No CPU limit on purpose: throttling a database to make a graph tidier is
+    # a latency problem you then have to debug. Memory is limited because the
+    # index is the thing that grows, and OOM is the honest failure for it.
+    memory: 512Mi
+
+# 65532 is the uid the image is built for, and fsGroup is what makes the
+# volume writable by it. They have to agree; see the Dockerfile.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# One pod per node where the cluster has the nodes for it, and a schedulable
+# pod where it does not. ScheduleAnyway rather than DoNotSchedule so that a
+# two-node cluster still starts rather than leaving a pod Pending for ever.
+topologySpread:
+  enabled: true
+  maxSkew: 1
+  topologyKey: kubernetes.io/hostname
+  whenUnsatisfiable: ScheduleAnyway
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+podDisruptionBudget:
+  enabled: true
+  # The leader is deliberately not evictable: draining the node it is on would
+  # take writes down with no automatic recovery, and this chart would rather
+  # refuse the drain than hide that. Set to 1 to allow it, and read the
+  # promotion runbook first.
+  leaderMaxUnavailable: 0
+  replicaMaxUnavailable: 1
+
+# For prometheus-operator. Without it, scrape /metrics on port http.
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  scrapeTimeout: 10s
+  labels: {}
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+# Probes. /health is the one route a token does not cover, which is what makes
+# it usable as a probe without giving the kubelet the database's secret.
+probes:
+  liveness:
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 2
+    failureThreshold: 3
+  readiness:
+    initialDelaySeconds: 2
+    periodSeconds: 5
+    timeoutSeconds: 2
+    failureThreshold: 3
+  # A store with a large index takes time to open, and every key is read before
+  # it answers anything. This is what stops the kubelet killing a pod that is
+  # doing exactly what it should be doing.
+  startup:
+    enabled: true
+    periodSeconds: 5
+    failureThreshold: 60
+
+# Seconds a pod gets to finish in-flight requests before SIGKILL. Must be
+# longer than -shutdown-timeout or the kubelet ends what the server is still
+# tidying up.
+terminationGracePeriodSeconds: 60

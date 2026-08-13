@@ -1,0 +1,42 @@
+litekvd {{ .Chart.AppVersion }} is installed as {{ include "litekvd.fullname" . }}.
+
+  Writes  ->  {{ include "litekvd.fullname" . }}-leader:{{ .Values.service.port }}
+  Reads   ->  {{ include "litekvd.fullname" . }}-read:{{ .Values.service.port }}   (leader and {{ .Values.replicas }} replica{{ if ne (int .Values.replicas) 1 }}s{{ end }}, some possibly behind)
+
+Try it:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ include "litekvd.fullname" . }}-leader {{ .Values.service.port }}:{{ .Values.service.port }}
+  curl -X PUT --data-binary 'ada' http://127.0.0.1:{{ .Values.service.port }}/v1/keys/user:1
+  curl http://127.0.0.1:{{ .Values.service.port }}/v1/keys/user:1
+{{- if .Values.auth.enabled }}
+
+Every route except /health needs the token:
+
+  TOKEN=$(kubectl -n {{ .Release.Namespace }} get secret {{ include "litekvd.secretName" . }} -o jsonpath='{.data.token}' | base64 -d)
+  curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:{{ .Values.service.port }}/v1/keys/user:1
+{{- end }}
+
+Which node is which:
+
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/instance={{ .Release.Name }} -L litekv.io/role -o wide
+{{- if eq (int .Values.config.waitFor) 0 }}
+
+Replication is asynchronous: a write is acknowledged as soon as the leader has
+it, so losing the leader loses whatever the replicas had not received. Set
+config.waitFor=1 to hold each write until a replica has it — at the cost of a
+round trip per write, and read the README on what a 202 means before you do.
+{{- else }}
+
+Semi-synchronous: a write waits for {{ .Values.config.waitFor }} follower(s). A wait that runs
+out answers 202 and the record stays — a client that retries on 202 writes it
+twice. See the README.
+{{- end }}
+{{- if not .Values.auth.enabled }}
+
+There is no authentication. Anything that can reach the Service can read and
+write the whole store. Set auth.enabled=true, and note there is still no TLS.
+{{- end }}
+
+THERE IS NO AUTOMATIC FAILOVER. If the leader goes, writes stop until somebody
+promotes a replica. That is deliberate — two nodes raising the term at once
+gives the guarantee away — and the runbook is in deploy/README.md.

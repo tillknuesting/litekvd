@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "litekvd.fullname" . }}-read
+  labels: {{- include "litekvd.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.service.type }}
+  # Every pod, leader included, for reads that may be a little behind. A client
+  # that has just written and cannot tolerate that sends Litekv-After with the
+  # position it was given, and gets 412 from a node that has not caught up
+  # rather than a stale answer.
+  selector: {{- include "litekvd.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP

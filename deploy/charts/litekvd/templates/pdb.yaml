@@ -1,0 +1,33 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "litekvd.fullname" . }}-leader
+  labels: {{- include "litekvd.labels" . | nindent 4 }}
+spec:
+  # Zero by default, which means a drain of the leader's node is refused rather
+  # than granted. That is deliberate and it will surprise somebody: there is no
+  # automatic failover here, so evicting the leader takes writes down until a
+  # person promotes a replica. Refusing loudly beats an outage that looks like
+  # routine maintenance. Set leaderMaxUnavailable to 1 once you have read the
+  # promotion runbook.
+  maxUnavailable: {{ .Values.podDisruptionBudget.leaderMaxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "litekvd.componentLabels" (dict "Chart" .Chart "Release" .Release "Values" .Values "component" "leader") | nindent 6 }}
+---
+{{- if gt (int .Values.replicas) 0 }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "litekvd.fullname" . }}-replica
+  labels: {{- include "litekvd.labels" . | nindent 4 }}
+spec:
+  # Replicas are replaceable one at a time: one comes back, catches up from the
+  # leader, and the next may go.
+  maxUnavailable: {{ .Values.podDisruptionBudget.replicaMaxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "litekvd.componentLabels" (dict "Chart" .Chart "Release" .Release "Values" .Values "component" "replica") | nindent 6 }}
+{{- end }}
+{{- end }}

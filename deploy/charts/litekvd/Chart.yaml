@@ -1,0 +1,21 @@
+apiVersion: v2
+name: litekvd
+description: A key-value store served over HTTP, with a leader and read replicas.
+type: application
+
+# The chart's own version, bumped when the templates change. appVersion is the
+# litekvd release it installs by default, and the two move independently.
+version: 0.1.0
+appVersion: "1.0.0"
+
+home: https://github.com/tillknuesting/litekvd
+sources:
+  - https://github.com/tillknuesting/litekvd
+  - https://github.com/tillknuesting/litekv
+keywords:
+  - key-value
+  - database
+  - storage
+maintainers:
+  - name: tillknuesting
+    url: https://github.com/tillknuesting
