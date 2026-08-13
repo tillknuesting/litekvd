@@ -8,8 +8,19 @@ import (
 // or fails loudly; a promotion made for the wrong reason is quiet and permanent,
 // so these are about when it decides rather than about how it acts.
 
+// at is a replica, that far through its leader's records.
 func at(term, applied uint64) *status {
 	return &status{Term: term, AppliedSeq: applied, Role: "replica", WaitFor: 1}
+}
+
+// leading is a node that says it is the leader, which is not the same thing and
+// must not be spelled with at(): a write target whose status says "replica" is
+// a node the controller re-promotes, so using at() for a healthy leader makes a
+// test reach the network and pass or fail on whether something answers port
+// 8080 on the machine running it. CI found that; this laptop had something
+// listening.
+func leading(term, seq uint64) *status {
+	return &status{Term: term, Seq: seq, Role: "leader", WaitFor: 1}
 }
 
 // TestFurtherRanksByTermThenSequence. The same comparison a leader uses to
@@ -61,7 +72,7 @@ func TestASilentLeaderIsNotImmediatelyGone(t *testing.T) {
 	// the next silence is measured from its own beginning rather than from an
 	// hour ago.
 	back := []node{
-		{pod: named("lk-0"), status: at(0, 5)},
+		{pod: named("lk-0"), status: leading(0, 6)},
 		{pod: named("lk-replica-0"), status: at(0, 5)},
 	}
 	if err := c.decide(t.Context(), back, "lk-0"); err != nil {
