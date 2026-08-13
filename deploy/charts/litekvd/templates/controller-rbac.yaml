@@ -1,0 +1,46 @@
+{{- if .Values.controller.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "litekvd.fullname" . }}-controller
+  labels: {{- include "litekvd.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "litekvd.fullname" . }}-controller
+  labels: {{- include "litekvd.labels" . | nindent 4 }}
+# A Role and not a ClusterRole, and every verb here is one the controller
+# actually makes. It reads pods to find the nodes and their addresses, patches
+# pod labels to take a stale node out of the read Service, patches the write
+# Service to move the leader, and holds one Lease so that two controllers cannot
+# both promote.
+#
+# What it deliberately cannot do: create or delete anything, touch a
+# StatefulSet, read a Secret, or see another namespace. A controller that can
+# delete a pod is a controller that can delete the last copy of your data.
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "litekvd.fullname" . }}-controller
+  labels: {{- include "litekvd.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "litekvd.fullname" . }}-controller
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "litekvd.fullname" . }}-controller
+    namespace: {{ .Release.Namespace }}
+{{- end }}

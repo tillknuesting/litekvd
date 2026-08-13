@@ -23,6 +23,8 @@ them was visible from `helm template`.
 | `Service/<r>-litekvd-headless`    | stable per-pod DNS, and what the StatefulSets are governed by |
 | `PodDisruptionBudget` ×2          | the leader is not evictable by default. See below    |
 | `Secret/<r>-litekvd-token`        | a generated bearer token, when `auth.enabled`        |
+| `Deployment/<r>-litekvd-controller` | optional: automatic failover, off by default       |
+| `Role`, `RoleBinding`, `Lease`    | what the controller needs, and nothing more          |
 | `ServiceMonitor`                  | optional, for prometheus-operator                    |
 
 Each pod gets a PersistentVolumeClaim through `volumeClaimTemplates`, so a pod
@@ -30,23 +32,116 @@ that is rescheduled finds its own store where it left it.
 
 ## The one thing to understand first
 
-**This chart does not fail over, and that is deliberate rather than unfinished.**
+**litekvd has no leader election, and is not going to grow one.** Two stores
+raising the term at once puts both on the same term and gives the guarantee
+away; what makes a promoted replica safe to write to is that exactly one
+promotion happened. So exactly one thing may decide, and it is not the database.
 
-litekvd has no leader election. Which node leads is a decision something outside
-the process makes, because two nodes raising the term at once puts both on the
-same term and gives the guarantee away — the thing that makes a promoted replica
-safe to write to is that exactly one promotion happened. A chart that elected a
-leader by itself would be quietly undoing the engine's central rule.
+You have two ways to be that one thing.
 
-So the leader is its own StatefulSet with one pod, the followers are another,
-and promotion is a runbook a person runs. What the chart does give you is that
-the runbook is three commands, does not involve reinstalling anything, and
-cannot put two nodes in the write path while you do it.
+**By hand.** The leader is its own StatefulSet, promotion is three commands, and
+[the runbook](#the-failover-runbook) is what they are. Nothing happens without
+you, which for a small deployment is often the right answer: the failure modes
+are yours to see and there is no policy to trust at three in the morning.
 
-If you want automatic failover, what you want is an operator holding a lease —
-and that is a separate piece of software, not a values flag.
+**With the controller**, `controller.enabled=true`. It holds a
+`coordination.k8s.io` Lease and promotes for you. This is not a leader election
+implemented here — the API server sits on a Raft cluster, so a Lease updated
+with `resourceVersion` optimistic concurrency *is* a linearizable
+compare-and-swap. The controller consumes agreement that already exists rather
+than inventing any, which is why it is a few hundred lines and not a Raft
+implementation. See [Automatic failover](#automatic-failover).
+
+Either way the write Service selects **one pod by name**, so two nodes cannot be
+in the write path while you change which one it is.
+
+## Automatic failover
+
+```bash
+helm install lk deploy/charts/litekvd -n litekv --create-namespace \
+  --set controller.enabled=true \
+  --set config.waitFor=1
+```
+
+Two controller pods, one holding the Lease and one standing by. Once a second it
+takes or renews the Lease, asks every litekvd pod for `/v1/status`, and if the
+leader has been gone for longer than `controller.grace` it promotes the replica
+that got furthest, points the write Service at it, and takes the old one out of
+the read path.
+
+Measured on k3d, with the leader scaled away and nothing else touched:
+
+```
+17:17:31 WARN the leader stopped being the leader pod=lk-litekvd-0 why=gone grace=10s
+17:17:41 WARN failing over from=lk-litekvd-0 to=lk-litekvd-replica-0 candidate applied=3
+17:17:41 WARN failed over leader=lk-litekvd-replica-0 term=1
+```
+
+Ten seconds, to the second, and the record written before the failover was still
+there afterwards.
+
+### What it refuses to do
+
+The reluctance is the design. Each of these was written as a guard and then
+tested by deleting the guard and watching a test fail.
+
+**It will not fail over an asynchronous cluster.** With `config.waitFor: 0` an
+acknowledged write may exist only on the node that just died, so promoting
+anything at all loses it while answering 204 to everybody afterwards. The
+controller refuses and says so. `controller.requireWaitFor: false` overrides it,
+and that is a decision about your data rather than a tuning knob.
+
+**It will not promote a node it cannot see**, or one the kubelet says is not
+Ready. A controller that can reach nothing is far likelier to be the broken
+thing than to be the last witness of everything else breaking.
+
+**It will not act on a stale Lease.** A round polls every pod, and each of those
+can wait out `-probe-timeout`; a round that took longer than half the Lease
+duration does nothing and comes back. That is the window where two controllers
+could otherwise overlap.
+
+**It will not treat a blip as a death.** `controller.grace` is a run of
+consecutive failures, reset the moment the leader answers again — not an
+aggregate. A leader restarting for an upgrade must not be replaced for it, which
+is why the default is 15s and why it has to be comfortably above how long your
+leader takes to come back.
+
+The one thing it does *not* wait for is a fenced leader: a node that has been
+told by a newer term that it is finished is not a judgement call, so that
+promotes immediately.
+
+### Ranking the candidates
+
+`/v1/status` carries `seq` and `applied_seq`, and the controller ranks by
+`(term, applied_seq)` — the same comparison a leader uses to decide whether a
+follower has reached a write. Positions themselves stay opaque cookies; these
+are separate integers added because something choosing between replicas has to
+answer "which got furthest" and cannot do it with two base64 strings.
+
+### What it cannot do
+
+**It cannot stop the old leader taking writes from a client that reaches it
+directly**, bypassing the Service. Nothing here can: fencing is something a
+store is *told*, and the old leader is told only when something carrying the
+newer term talks to it. Traffic is moved, not amputated.
+
+What the controller does do is keep it out of both Services — by name for
+writes, and by taking the `litekv.io/serving` label off it for reads, every
+round rather than only at the moment of failover. That second part exists
+because of a drill: the old leader's pod came back, its template stamped the
+label on again, and it rejoined the read Service still serving the history that
+diverged at the promotion.
+
+### Watching it before trusting it
+
+`controller.dryRun: true` decides everything and changes nothing, logging what
+it would have done. Run it that way for a week and read the grace periods and
+candidate choices it reports; a failover policy you have not watched is one you
+are guessing about.
 
 ## Development, with k3d
+
+### Development, with k3d
 
 A cluster, the image, and the chart:
 

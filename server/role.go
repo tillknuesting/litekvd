@@ -180,8 +180,42 @@ type statusBody struct {
 	Fenced   bool   `json:"fenced,omitempty"`
 	Position string `json:"position"`
 	Applied  string `json:"applied,omitempty"`
-	Segments int    `json:"segments"`
-	Keys     int    `json:"keys"`
+
+	// Seq and AppliedSeq are the record numbers those two positions name, and
+	// they are here so that two nodes can be compared.
+	//
+	// A position is an opaque cookie by design — a client hands back what it
+	// was given and never takes it apart, which is what let DBPosition gain a
+	// field twice with nothing on the client side knowing. That is right for a
+	// client and useless to anything choosing between replicas, which has to
+	// answer "which of these got furthest" and cannot do it with two base64
+	// strings.
+	//
+	// Ordered by (term, seq), the same comparison a leader uses to decide
+	// whether a follower has reached a write: a higher term wins outright, and
+	// within a term the higher sequence number is further along. AppliedSeq is
+	// the one to rank replicas by, since it is how far through the leader's
+	// records that node has taken; Seq is where its own store is.
+	//
+	// A position names the record that comes *next*, not the last one written,
+	// so an empty store reports 1 rather than 0. That is the engine's rule and
+	// not a rounding here — it is what makes a position something to resume
+	// from. Comparisons are unaffected: higher is still further along.
+	Seq        uint64 `json:"seq"`
+	AppliedSeq uint64 `json:"applied_seq,omitempty"`
+
+	// WaitFor is how many followers a write waits for on this node, which is
+	// the difference between a cluster that can lose a leader without losing an
+	// acknowledged write and one that cannot.
+	//
+	// It is here because anything deciding whether an automatic failover is
+	// safe has to know it, and asking the process is the only way to be sure:
+	// a chart says what it deployed, not what is running. Zero is asynchronous
+	// and the field is absent.
+	WaitFor int `json:"wait_for,omitempty"`
+
+	Segments int `json:"segments"`
+	Keys     int `json:"keys"`
 }
 
 // status answers GET /v1/status.
@@ -194,17 +228,21 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	leader, replica := s.following()
 
 	body := statusBody{Role: "leader", Term: s.db.Term(), Leader: leader,
-		Fenced: s.db.Fenced(), Segments: s.db.Segments(), Keys: s.db.Len()}
+		Fenced: s.db.Fenced(), Segments: s.db.Segments(), Keys: s.db.Len(),
+		WaitFor: s.opts.WaitFor}
 	if replica {
 		body.Role = "replica"
 	}
 
 	var err error
-	if body.Position, err = positionParam(s.db.Position()); err != nil {
+	position := s.db.Position()
+	body.Seq = position.Log.Seq
+	if body.Position, err = positionParam(position); err != nil {
 		s.fail(w, r, err)
 		return
 	}
 	if applied := s.db.Applied(); applied != (litekv.DBPosition{}) {
+		body.AppliedSeq = applied.Log.Seq
 		if body.Applied, err = positionParam(applied); err != nil {
 			s.fail(w, r, err)
 			return

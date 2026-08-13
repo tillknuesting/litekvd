@@ -23,6 +23,9 @@ spec:
         # selects a pod by name, because a label can end up on two pods and a
         # name cannot. See service-leader.yaml.
         litekv.io/role: leader
+        # In the read Service until something takes it out. See
+        # service-read.yaml.
+        litekv.io/serving: "true"
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

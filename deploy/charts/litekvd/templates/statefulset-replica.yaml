@@ -23,6 +23,9 @@ spec:
         # Informational only; nothing routes on it. Promotion patches the
         # leader Service's selector, not this. See service-leader.yaml.
         litekv.io/role: replica
+        # In the read Service until something takes it out. See
+        # service-read.yaml.
+        litekv.io/serving: "true"
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

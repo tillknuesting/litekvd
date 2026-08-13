@@ -1,0 +1,105 @@
+{{- if .Values.controller.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "litekvd.fullname" . }}-controller
+  labels:
+    {{- include "litekvd.labels" . | nindent 4 }}
+    app.kubernetes.io/component: controller
+spec:
+  # Two, so that a node going down does not take the failover mechanism with
+  # it. They cannot both act: the Lease is a compare-and-swap against the API
+  # server's etcd, and only the holder does anything.
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels:
+      {{- include "litekvd.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller
+  template:
+    metadata:
+      labels:
+        {{- include "litekvd.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: controller
+    spec:
+      serviceAccountName: {{ include "litekvd.fullname" . }}-controller
+      # The one pod here that does need its token: it is how it talks to the
+      # API server, and there is no other credential involved.
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        # Without this the mounted token is owned by root and a 0400 file is
+        # unreadable to the process meant to read it. The store's pods have it
+        # for the same reason; a Deployment written without one crash-loops on
+        # "permission denied" and looks like an RBAC problem, which it is not.
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      {{- if gt (int .Values.controller.replicas) 1 }}
+      # Keep them apart, or both copies go down with one node — which is the
+      # moment the failover was for.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "litekvd.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: controller
+      {{- end }}
+      containers:
+        - name: controller
+          image: "{{ .Values.controller.image.repository | default (printf "%s-controller" .Values.image.repository) }}:{{ .Values.controller.image.tag | default .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - -grace={{ .Values.controller.grace }}
+            - -interval={{ .Values.controller.interval }}
+            - -lease-duration={{ .Values.controller.leaseDuration }}
+            - -require-wait-for={{ .Values.controller.requireWaitFor }}
+            - -dry-run={{ .Values.controller.dryRun }}
+            {{- if .Values.auth.enabled }}
+            - -token-file=/etc/litekvd/token
+            {{- end }}
+            {{- if .Values.controller.verbose }}
+            - -verbose
+            {{- end }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: LITEKV_RELEASE
+              value: {{ include "litekvd.fullname" . }}
+            # Not the same string. The fullname above names the Services and
+            # StatefulSets; this is what the pods are labelled with, and Helm
+            # derives the two differently.
+            - name: LITEKV_INSTANCE
+              value: {{ .Release.Name }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources: {{- toYaml .Values.controller.resources | nindent 12 }}
+          {{- if .Values.auth.enabled }}
+          volumeMounts:
+            - name: token
+              mountPath: /etc/litekvd
+              readOnly: true
+          {{- end }}
+      {{- if .Values.auth.enabled }}
+      volumes:
+        - name: token
+          secret:
+            secretName: {{ include "litekvd.secretName" . }}
+            items:
+              - key: token
+                path: token
+            defaultMode: 0400
+      {{- end }}
+{{- end }}

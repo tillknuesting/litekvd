@@ -5,11 +5,19 @@ metadata:
   labels: {{- include "litekvd.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
-  # Every pod, leader included, for reads that may be a little behind. A client
-  # that has just written and cannot tolerate that sends Litekv-After with the
-  # position it was given, and gets 412 from a node that has not caught up
-  # rather than a stale answer.
-  selector: {{- include "litekvd.selectorLabels" . | nindent 4 }}
+  # Every pod that is serving, leader included, for reads that may be a little
+  # behind. A client that has just written and cannot tolerate that sends
+  # Litekv-After with the position it was given, and gets 412 from a node that
+  # has not caught up rather than a stale answer.
+  #
+  # The serving label is set by the pod template and removed by the controller
+  # from a node it has failed away from. That node does not know it was
+  # replaced — nothing has told it — so left in here it would answer reads out
+  # of a history that stopped being the history at the promotion. It comes back
+  # once it is following the current leader again.
+  selector:
+    {{- include "litekvd.selectorLabels" . | nindent 4 }}
+    litekv.io/serving: "true"
   ports:
     - name: http
       port: {{ .Values.service.port }}

@@ -33,8 +33,11 @@ COPY . .
 # copying — if you are chasing a panic in production, build without them.
 ARG TARGETOS
 ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-arm64} \
-    go build -trimpath -ldflags="-s -w" -o /litekvd .
+ENV CGO_ENABLED=0
+RUN GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-arm64} \
+    go build -trimpath -ldflags="-s -w" -o /litekvd . \
+ && GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-arm64} \
+    go build -trimpath -ldflags="-s -w" -o /litekv-controller ./cmd/litekv-controller
 
 # Assembled here because scratch has no shell to assemble them in.
 #
@@ -46,7 +49,23 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-arm64} \
 RUN printf 'nonroot:x:65532:65532:nonroot:/:/sbin/nologin\n' > /passwd.min \
  && mkdir -p /empty/data
 
-FROM scratch
+# The controller, which is its own image so that the store's stays as small as
+# it is. Build it with --target controller; the store is the default because it
+# is the last stage.
+#
+# It needs the CA bundle for real: it talks to the API server over TLS and
+# verifies it against the cluster's own certificate authority.
+FROM scratch AS controller
+
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /passwd.min /etc/passwd
+COPY --from=build /litekv-controller /usr/local/bin/litekv-controller
+
+USER 65532:65532
+
+ENTRYPOINT ["/usr/local/bin/litekv-controller"]
+
+FROM scratch AS litekvd
 
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=build /passwd.min /etc/passwd

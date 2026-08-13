@@ -476,3 +476,77 @@ func TestAFencedLeaderSaysSo(t *testing.T) {
 	wants(t, do(t, s, http.MethodPut, "/v1/keys/k", strings.NewReader("v")), http.StatusConflict)
 	wants(t, do(t, s, http.MethodGet, "/v1/keys", nil), http.StatusOK)
 }
+
+// TestStatusSaysHowFarEachNodeGot. The reason this field exists is that
+// something choosing between replicas has to answer "which of these got
+// furthest", and two opaque cookies cannot answer it.
+//
+// The ordering is (term, seq), which is the comparison a leader already uses to
+// decide whether a follower has reached a write — see reaches in acks.go. If
+// these two ever disagree, the one in acks.go is right and this is wrong.
+func TestStatusSaysHowFarEachNodeGot(t *testing.T) {
+	up := serving(t, litekv.DBOptions{Sync: litekv.SyncNever})
+
+	read := func(s *Server) statusBody {
+		t.Helper()
+
+		var body statusBody
+		if err := json.Unmarshal(wants(t, do(t, s, http.MethodGet, "/v1/status", nil),
+			http.StatusOK), &body); err != nil {
+			t.Fatalf("the status is not the status shape: %v", err)
+		}
+		return body
+	}
+
+	// A position names the record that comes next, so an empty store is at 1
+	// and not at 0. Pinned because it is the kind of off-by-one somebody
+	// "fixes" into a store that reports having a record it does not have.
+	if got := read(up.api).Seq; got != 1 {
+		t.Errorf("an empty store reports seq %d, want 1 — a position names what comes next", got)
+	}
+
+	// It rises with the records, and it is the number the position names
+	// rather than a count of anything.
+	for i := range 5 {
+		if err := up.db.Write(fmt.Appendf(nil, "k%d", i), []byte("v")); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	leader := read(up.api)
+	if leader.Seq <= 1 {
+		t.Fatalf("a store with five records reports seq %d", leader.Seq)
+	}
+	if want := up.db.Position().Log.Seq; leader.Seq != want {
+		t.Errorf("seq is %d, want %d — it must be the position's own number", leader.Seq, want)
+	}
+	if leader.AppliedSeq != 0 {
+		t.Errorf("a leader follows nobody and reports applied_seq %d", leader.AppliedSeq)
+	}
+
+	// A replica reports how far through its leader's records it has taken,
+	// which is the number to rank candidates by. Its own position is its own
+	// business and may be at a different number entirely, since the two stores
+	// are laid out independently.
+	s, db := newServer(t, Options{})
+	if err := s.Follow(up.srv.URL, FollowerOptions{Logger: quiet(),
+		MinBackoff: time.Millisecond, MaxBackoff: 20 * time.Millisecond}); err != nil {
+		t.Fatal(err)
+	}
+	waitForPositions(t, db, up.db, "the replica to catch up")
+
+	replica := read(s)
+	if replica.AppliedSeq != leader.Seq {
+		t.Errorf("a caught-up replica reports applied_seq %d against the leader's seq %d",
+			replica.AppliedSeq, leader.Seq)
+	}
+
+	// And a replica that is behind reports a smaller number, which is the
+	// whole point: it is what makes "furthest" a question with an answer.
+	if err := up.db.Write([]byte("after"), []byte("v")); err != nil {
+		t.Fatal(err)
+	}
+	if moved := read(up.api).Seq; moved <= leader.Seq {
+		t.Errorf("the leader wrote a record and its seq did not move: %d", moved)
+	}
+}

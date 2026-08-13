@@ -143,6 +143,52 @@ serviceMonitor:
   scrapeTimeout: 10s
   labels: {}
 
+# Automatic failover.
+#
+# Off by default, because a chart should not start promoting things because
+# somebody installed it. Everything below is a decision, and the two that matter
+# are grace and requireWaitFor.
+controller:
+  enabled: false
+
+  # Two, so that losing a node does not take the failover mechanism with it.
+  # They cannot both act: the Lease is a compare-and-swap against the API
+  # server, and only its holder does anything.
+  replicas: 2
+
+  # How long the leader must be unreachable before it is replaced. The single
+  # most important number here: too short and a rolling restart or a long GC
+  # pause becomes a failover, too long and an outage lasts that much longer.
+  # It has to be comfortably above how long the leader takes to restart.
+  grace: 15s
+  interval: 1s
+  leaseDuration: 15s
+
+  # Refuse to fail over unless the store is running with waitFor set. Without
+  # it an acknowledged write may exist only on the node that just died, and
+  # promoting anything at all loses it silently. Turning this off is a decision
+  # about somebody's data, not a tuning knob.
+  requireWaitFor: true
+
+  # Decide everything, change nothing, and say what it would have done. The way
+  # to watch a grace period and a candidate choice for a week before trusting
+  # either of them.
+  dryRun: false
+
+  verbose: false
+
+  image:
+    # Empty takes the store's repository with -controller on the end.
+    repository: ""
+    tag: ""
+
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 64Mi
+
 serviceAccount:
   create: true
   name: ""
