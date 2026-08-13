@@ -160,22 +160,107 @@ machine that lost power comes back and starts normally — there is nothing to c
 
 ### Running it as a service
 
-There is no packaging and none is needed. A unit file:
+Copy-paste, on the machine that will run it. It builds the binary, makes a user for it,
+writes a unit and starts it. Read it before you run it — it does need root, and it writes
+to `/usr/local/bin` and `/etc/systemd/system`.
 
-```ini
+```bash
+# 1. Build and install the binary.
+go install github.com/tillknuesting/litekvd@latest
+sudo install -m 0755 "$(go env GOPATH)/bin/litekvd" /usr/local/bin/litekvd
+
+#    No Go on the target? Build it somewhere that has one and copy it over.
+#    Nothing is linked, so the binary is the whole of it:
+#      GOOS=linux GOARCH=arm64 go build -o litekvd-arm64 github.com/tillknuesting/litekvd
+#      scp litekvd-arm64 pi:/tmp/ && ssh pi 'sudo install -m 0755 /tmp/litekvd-arm64 /usr/local/bin/litekvd'
+
+# 2. A user that owns the data and can do nothing else. --user-group so that
+#    the Group= below is certain to exist; /usr/sbin/nologin is the Debian path.
+sudo useradd --system --user-group --no-create-home \
+    --shell /usr/sbin/nologin litekv || true
+
+# 3. The unit. systemd creates and owns /var/lib/litekv through StateDirectory.
+sudo tee /etc/systemd/system/litekvd.service >/dev/null <<'UNIT'
 [Unit]
 Description=litekvd
-After=network.target
+Documentation=https://github.com/tillknuesting/litekvd
+After=network-online.target
+Wants=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/litekvd -dir /var/lib/litekv -addr 127.0.0.1:8080 -sync every
-Restart=always
+ExecStart=/usr/local/bin/litekvd \
+    -dir /var/lib/litekv \
+    -spool-dir /var/lib/litekv \
+    -addr 127.0.0.1:8080 \
+    -sync every
 User=litekv
+Group=litekv
 StateDirectory=litekv
+StateDirectoryMode=0700
+
+Restart=always
+RestartSec=1s
+
+# It needs one directory and a socket. Everything else can be taken away.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target
+UNIT
+
+# 4. Start it, and check.
+sudo systemctl daemon-reload
+sudo systemctl enable --now litekvd
+systemctl status litekvd --no-pager
+curl -sS http://127.0.0.1:8080/health && echo
 ```
+
+Four choices in there are worth knowing about rather than inheriting.
+
+**`-spool-dir /var/lib/litekv`, not the default.** A snapshot on its way to a follower is
+spooled to a file first, and the default is the system temporary directory — which under
+`PrivateTmp=true` is a tmpfs, and therefore memory. Pointing it at the data directory is
+what keeps a snapshot of a large store off the heap. It costs nothing if you never
+replicate.
+
+**`-sync every`, not the default `always`.** `always` waits for the disk on every write,
+which is what you get running the binary by hand; `every` batches those waits into one a
+second, and is the usual trade for a service. What it costs is the writes of the last
+second if the machine loses power — not if the process dies, which is a different and much
+more common failure. Take the `-sync every` line out if that second matters.
+
+**`127.0.0.1`.** There is no TLS and no authentication unless you add `-token-file`. Putting
+it on `0.0.0.0` hands the whole database to anything that can reach the port.
+
+**`AF_NETLINK` in that allow-list, which looks like it does not belong.** Go's resolver
+reaches for netlink on Linux to work out whether the machine has usable IPv6, and a service
+that follows a `-leader` by hostname has to resolve one. Taking it out is the kind of change
+that works on the machine you test it on and fails on the one that has to resolve something.
+
+**`StateDirectory` rather than a `mkdir`.** systemd creates `/var/lib/litekv` owned by the
+service user, recreates it if it is removed, and `ProtectSystem=strict` makes it the only
+writable path the process has. `StateDirectoryMode=0700` keeps the store readable only by
+that user, which matters because the values are in those files in the clear.
+
+To watch it, change it, or take it away:
+
+```bash
+journalctl -u litekvd -f                     # its log
+sudo systemctl edit litekvd                  # override the flags without touching the unit
+sudo systemctl disable --now litekvd         # stop it and leave the data
+sudo rm /etc/systemd/system/litekvd.service  # and remove it; /var/lib/litekv stays
+```
+
+`systemctl edit` is the one worth remembering: it writes a drop-in that survives reinstalling
+the unit, so the flags you chose are not lost the next time you paste the block above.
 
 `SIGTERM` is a clean shutdown: it stops taking requests, lets the ones in flight finish, closes
 the writer so that everything acknowledged is on the disk, and then closes the store. `SIGKILL`
