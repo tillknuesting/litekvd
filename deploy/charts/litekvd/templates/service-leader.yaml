@@ -10,14 +10,20 @@ spec:
   type: {{ .Values.service.type }}
   # Writes go here, and so does every follower's -leader.
   #
-  # The selector carries the role, which is what makes a promotion possible
-  # without reinstalling anything: move the label and this Service, and every
-  # follower through it, is pointing somewhere else. It is also why the label is
-  # not in litekvd.selectorLabels — a Service that selected on those would catch
-  # the replicas too and send writes to nodes that answer 409.
+  # It selects one pod BY NAME, using the label Kubernetes puts on every
+  # StatefulSet pod itself. Promotion is a patch of this selector, and every
+  # follower comes with it because a follower's -leader is this Service rather
+  # than a pod.
+  #
+  # By name and not by a role label, because a label can be on two pods at once
+  # and this must never route to two. It did: a promotion moved the label to a
+  # replica, the old leader's node came back, its StatefulSet recreated it with
+  # the template's own role label, and both were in this Service — one taking
+  # writes it had been superseded out of, the other taking writes for real,
+  # neither aware of the other. A pod name has room for one answer.
   selector:
     {{- include "litekvd.selectorLabels" . | nindent 4 }}
-    litekv.io/role: leader
+    statefulset.kubernetes.io/pod-name: {{ .Values.leaderPodName | default (printf "%s-0" (include "litekvd.fullname" .)) }}
   ports:
     - name: http
       port: {{ .Values.service.port }}

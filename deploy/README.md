@@ -7,9 +7,10 @@ helm install lk deploy/charts/litekvd -n litekv --create-namespace
 ```
 
 Everything here was run against a four-node [k3d](https://k3d.io) cluster before
-it was written down, including the failover drill — which is how two bugs in
+it was written down, including the failover drill — which is how three bugs in
 this chart were found. They are in [What testing found](#what-testing-found), at
-the bottom, because the second one would have shipped silently.
+the bottom, because the last one put two nodes in the write path and none of
+them was visible from `helm template`.
 
 ## What you get
 
@@ -17,7 +18,7 @@ the bottom, because the second one would have shipped silently.
 | ------------------------- | -------------------------------------------------------------- |
 | `StatefulSet/<r>-litekvd`         | the leader. One replica, and that is not a number to raise |
 | `StatefulSet/<r>-litekvd-replica` | the followers. Two by default                        |
-| `Service/<r>-litekvd-leader`      | **writes**. Selects on a mutable role label, which is what makes promotion possible |
+| `Service/<r>-litekvd-leader`      | **writes**. Selects exactly one pod, by name         |
 | `Service/<r>-litekvd-read`        | **reads**, from every pod, some possibly behind      |
 | `Service/<r>-litekvd-headless`    | stable per-pod DNS, and what the StatefulSets are governed by |
 | `PodDisruptionBudget` ×2          | the leader is not evictable by default. See below    |
@@ -39,7 +40,8 @@ leader by itself would be quietly undoing the engine's central rule.
 
 So the leader is its own StatefulSet with one pod, the followers are another,
 and promotion is a runbook a person runs. What the chart does give you is that
-the runbook is three commands and does not involve reinstalling anything.
+the runbook is three commands, does not involve reinstalling anything, and
+cannot put two nodes in the write path while you do it.
 
 If you want automatic failover, what you want is an operator holding a lease —
 and that is a separate piece of software, not a values flag.
@@ -84,6 +86,11 @@ Who is who, and where:
 
 ```bash
 kubectl -n litekv get pods -L litekv.io/role -o wide
+
+# and who is actually taking writes, which is the Service's selector and not a
+# pod label:
+kubectl -n litekv get svc lk-litekvd-leader \
+  -o jsonpath='{.spec.selector.statefulset\.kubernetes\.io/pod-name}{"\n"}'
 ```
 
 Tear it down:
@@ -158,12 +165,16 @@ curl -H "Authorization: Bearer $TOKEN" -X POST http://127.0.0.1:8081/v1/promote
 # {"term":1}
 ```
 
-**3. Move the role label.** This repoints the leader Service, and with it every
-follower, since a follower's `-leader` is that Service and not a pod:
+**3. Point the write Service at it.** This repoints every follower too, since a
+follower's `-leader` is that Service and not a pod:
 
 ```bash
-kubectl -n litekv label pod lk-litekvd-replica-0 litekv.io/role=leader --overwrite
+kubectl -n litekv patch svc lk-litekvd-leader \
+  -p '{"spec":{"selector":{"statefulset.kubernetes.io/pod-name":"lk-litekvd-replica-0"}}}'
 ```
+
+Set `leaderPodName` to the same value before the next `helm upgrade`, or the
+upgrade will put the selector back on the old leader.
 
 **4. Watch the followers come back.** Writes work again immediately, but for a
 few seconds they answer **202 with `Litekv-Replicated: 0`** — the surviving
@@ -185,20 +196,29 @@ curl -H "Authorization: Bearer $TOKEN" -i -X PUT --data-binary 'x' \
 **The failover is not complete until `litekv_replication_followers` has come
 back up.** Until then you are running unreplicated, whatever the writes say.
 
-**5. Get back to a normal shape.** You are now running a leader that lives in
-the replica StatefulSet, which works but is not a resting state:
+**5. Leave the old leader at zero.** This is the step to get right, and the one
+the drill was extended to cover.
 
-- Its pod label is `leader`; the template says `replica`, so **a restart puts it
-  back to `replica`** and writes stop again. That is a fallback rather than a
-  surprise — it fails safe — but it is not something to leave over a weekend.
-- The old leader's PVC still holds its data. Whatever it had that the replicas
-  did not is in there, and it is the only copy.
+The old leader has its own history and **does not know it was superseded** —
+nothing has contacted it carrying the newer term, so it reports `role=leader`,
+`term=0`, and `/health` 200. It is not fenced, because fencing is something a
+store is told and nobody has told it.
 
-The way back is to scale the leader StatefulSet up with the promoted node's data
-— copy it into the leader's PVC while both are stopped — or to accept the loss,
-wipe the old leader's volume, and let it come back and take a snapshot. Which of
-those is right depends on what the old leader had that nobody else did, and that
-is a judgement rather than a command.
+The write Service cannot reach it: that selects one pod by name and the name is
+now the promoted one. Verified by bringing the old leader back deliberately and
+watching the endpoint list stay at one. **But the read Service selects every
+healthy pod**, so a returning old leader will serve reads out of a history that
+diverged at the moment of the promotion.
+
+So: leave `lk-litekvd` scaled to `0` until you have dealt with its volume. Its
+PVC still holds whatever it had that the replicas never received, and that is
+the only copy — copy it out before you wipe anything.
+
+The way back to a normal shape is either to stop everything, copy the promoted
+node's data into the leader's PVC, and scale the leader back up; or to accept
+the loss, wipe the old leader's volume, and let it come back as a follower and
+take a snapshot. Which is right depends on what the old leader had that nobody
+else did, and that is a judgement rather than a command.
 
 ## Operating it
 
@@ -228,8 +248,21 @@ a short write outage rather than a failover.
 
 ## What testing found
 
-Two bugs, both in this chart rather than in litekvd, and both only visible from
-a real cluster.
+Three bugs, all in this chart rather than in litekvd, and none of them visible
+from `helm template`.
+
+**A promotion plus a returning old leader put two nodes in the write Service.**
+The worst of the three, and it took a second drill to find: promote a replica,
+move the label, then let the old leader's node come back. Its StatefulSet
+recreates the pod, the pod template stamps the role label on it, and the write
+Service — which selected on that label — now has two endpoints. Two nodes taking
+writes into two histories, which is the one failure the engine's whole term
+mechanism exists to prevent, arranged by the chart on top of it.
+
+The write Service selects a pod **by name** now, using the
+`statefulset.kubernetes.io/pod-name` label Kubernetes maintains itself. A label
+can end up on two pods; a name has room for one answer. Re-run with the fix, the
+old leader comes back and the endpoint list stays at exactly one.
 
 **The role label was in the StatefulSet selector, so promoting a pod orphaned
 it.** Moving `litekv.io/role` to `leader` made the pod stop matching the

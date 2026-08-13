@@ -21,6 +21,15 @@ fullnameOverride: ""
 # topology spread below lands one on each of three nodes.
 replicas: 2
 
+# Which pod the write Service points at. Empty means "<release>-litekvd-0",
+# the leader StatefulSet's only pod, which is what a fresh install wants.
+#
+# A promotion sets this to the promoted pod — either by patching the Service
+# directly during an incident, or here so that the next helm upgrade does not
+# put it back. Exactly one name, because two leaders taking writes is the one
+# failure this whole arrangement exists to prevent.
+leaderPodName: ""
+
 service:
   port: 8080
   # The Service in front of the leader, which is where writes go. Its selector

@@ -20,10 +20,8 @@ spec:
     metadata:
       labels:
         {{- include "litekvd.componentLabels" (dict "Chart" .Chart "Release" .Release "Values" .Values "component" "replica") | nindent 8 }}
-        # Mutable. Promoting this pod means setting it to leader, which moves
-        # the leader Service onto it without detaching it from this
-        # StatefulSet. A restart puts it back to replica, which is a fallback
-        # rather than a surprise — see the runbook.
+        # Informational only; nothing routes on it. Promotion patches the
+        # leader Service's selector, not this. See service-leader.yaml.
         litekv.io/role: replica
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}

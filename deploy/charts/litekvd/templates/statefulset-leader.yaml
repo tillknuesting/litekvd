@@ -19,8 +19,9 @@ spec:
     metadata:
       labels:
         {{- include "litekvd.componentLabels" (dict "Chart" .Chart "Release" .Release "Values" .Values "component" "leader") | nindent 8 }}
-        # Mutable, and the only thing the leader Service selects on. Moving it
-        # is a promotion; it is deliberately not in the selector above.
+        # Informational only. Nothing routes on this: the leader Service
+        # selects a pod by name, because a label can end up on two pods and a
+        # name cannot. See service-leader.yaml.
         litekv.io/role: leader
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
