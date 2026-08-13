@@ -621,30 +621,117 @@ store the cheapest question that touches its state — no disk. **It is the one 
 not cover**: a load balancer probing this node is not a client and has no business holding the
 secret that opens the database.
 
-`GET /metrics` is Prometheus text — a counter per route, method and status, a latency histogram
-per route, and the store's own numbers:
+### Prometheus
 
-```
-litekv_requests_total{route="/v1/keys/{key}",method="GET",status="200"} 41231
-litekv_request_duration_seconds_bucket{route="/v1/keys/{key}",le="0.001"} 41180
-litekv_replication_streams 2
-litekv_replication_followers 1
-litekv_role{role="leader",leader=""} 1
-litekv_term 1
-litekv_store_keys 812
-litekv_store_segments 3
+`GET /metrics` is Prometheus text exposition, version 0.0.4, served by the same listener as
+everything else. There is no exporter to run beside it and nothing to configure:
+
+```yaml
+scrape_configs:
+  - job_name: litekvd
+    static_configs:
+      - targets: ["127.0.0.1:8080"]
 ```
 
-`litekv_replication_streams` is the one gauge a request in flight contributes to, and it exists
-because `litekv_requests_total` counts requests that *finished*: a replication stream that has
-been up for a week has never been counted once. How many followers are attached right now is the
-number an operator actually wants. A leader answering 202 to everything with
-`litekv_replication_followers` at zero is a leader whose followers are gone, which is exactly the
-thing worth alerting on.
+If `-token-file` is set, `/metrics` needs it like every other route except `/health`:
+
+```yaml
+    authorization:
+      type: Bearer
+      credentials_file: /etc/litekv/token
+```
+
+#### What it exposes
+
+| metric                             | type      | labels                  | what it is                                          |
+| ---------------------------------- | --------- | ----------------------- | ---------------------------------------------------- |
+| `litekv_requests_total`            | counter   | `route`, `method`, `status` | requests **answered**                            |
+| `litekv_request_duration_seconds`  | histogram | `route`                 | how long a route took; buckets 100 µs to 5 s         |
+| `litekv_role`                      | gauge     | `role`, `leader`        | always `1`, on the one series for what this node is  |
+| `litekv_term`                      | gauge     | —                       | the leader generation this store is on               |
+| `litekv_fenced`                    | gauge     | —                       | `1` once this store has heard of a newer leader      |
+| `litekv_replication_streams`       | gauge     | —                       | replication streams open right now                   |
+| `litekv_replication_followers`     | gauge     | —                       | followers `-wait-for` can actually wait for          |
+| `litekv_store_keys`                | gauge     | —                       | keys held, **tombstones included**                   |
+| `litekv_store_segments`            | gauge     | —                       | logs the store is spread across                      |
+
+Four of those have a wrinkle worth knowing before you build a graph on them.
+
+**`litekv_store_keys` counts tombstones.** A key that was deleted is still an index entry until
+a merge drops it, so this is the size of the index and not the number of live keys. It goes down
+at a merge, not at a delete, and a sawtooth is the store working rather than data going missing.
+
+**`litekv_role` is one series, not two.** The node exposes only the role it currently is, so a
+promotion makes `role="replica"` go stale and `role="leader"` appear. `changes()` on it will not
+work; alert on the label instead, or on `litekv_term`.
+
+**`litekv_replication_streams` and `..._followers` are usually equal and are not the same
+number.** A stream is a connection; a follower is a connection that identified itself and can
+therefore be counted towards `-wait-for`. Streams above followers means something is reading the
+replication route without being a countable follower, which is the difference between a
+semi-synchronous leader that works and one that answers 202 to everything.
+
+**`litekv_replication_streams` is the only gauge a request in flight contributes to.**
+`litekv_requests_total` counts requests that *finished*, and a replication stream that has been
+up for a week has never been counted once. Rate-of-requests panels will show a leader with a
+busy follower as idle.
+
+#### Queries to start from
+
+```promql
+# Requests a second, by route
+sum by (route) (rate(litekv_requests_total[5m]))
+
+# The share that failed, which should be flat and near zero
+sum(rate(litekv_requests_total{status=~"5.."}[5m]))
+  / sum(rate(litekv_requests_total[5m]))
+
+# 99th percentile latency per route
+histogram_quantile(0.99,
+  sum by (route, le) (rate(litekv_request_duration_seconds_bucket[5m])))
+
+# Writes that were stored but not replicated in time — semi-sync degrading
+sum(rate(litekv_requests_total{status="202"}[5m]))
+
+# Live keys, near enough, on a store that merges
+litekv_store_keys
+```
+
+#### What to alert on
+
+| alert                                                     | why it matters                                                       |
+| --------------------------------------------------------- | --------------------------------------------------------------------- |
+| `litekv_fenced == 1`                                       | this node has been replaced and every write it takes is refused. Nothing else about it looks wrong: it serves reads and reports a term |
+| `litekv_replication_followers == 0` (with `-wait-for` set) | every write is answering 202. The data is on one machine and the guarantee you configured is not being met |
+| `litekv_replication_streams == 0` on a leader with a replica | the follower is not connected, whatever the follower thinks           |
+| `rate(litekv_requests_total{status="202"}[5m]) > 0`        | the same thing seen from the writes rather than from the followers    |
+| `up == 0`, or `/health` failing                            | Prometheus's own metric; `/health` is the unauthenticated probe for a load balancer |
+
+`litekv_fenced` is the one to wire up first. A fenced node is the quietest failure this design
+has — it answers reads, reports a plausible term, and refuses every write with a 409 that only
+the writing client sees.
+
+#### What is not there
+
+**No replication lag.** There is no metric saying how far behind a replica is. `/v1/status`
+carries both positions and a client can compare them, but positions are opaque cookies and not
+subtractable, so there is no seconds-behind number to graph. Comparing `litekv_store_keys`
+between leader and replica is a rough proxy and no more than that.
+
+**No Go runtime or process metrics.** No `go_goroutines`, no
+`process_resident_memory_bytes` — those come from `client_golang`, and this module has no
+dependencies outside the standard library. Use `node_exporter` or a container's own metrics for
+the machine, and `up` for whether it is answering.
+
+**Nothing about the disk.** No bytes written, no merge count, no sync latency. The store knows
+those numbers; nothing exposes them yet.
 
 The route label is the **pattern** and never the path. A label taken from the URL would be one
 series per key, and `/metrics` would grow with the store until it was the largest thing this
-server sends anybody.
+server sends anybody. Every route is registered through one function so that it cannot be
+forgotten, and `TestEveryRouteIsCounted` holds it there.
+
+### Logs
 
 Requests are logged at Debug, so turning request logging on is a level rather than a flag. A
 server logging every request at Info is a server whose log nobody reads, and the failures that
@@ -737,6 +824,9 @@ Read these before choosing this, not after.
   that — the lock needs `flock`, which those platforms do not have in Go's standard library.
 - **Expiry is checked on read, not swept.** A store full of expired records is as large as a store
   full of live ones until the next merge.
+- **There is no seconds-behind number for a replica.** `/v1/status` carries both positions and
+  metrics carry neither lag nor a timestamp, so "how far behind is it" can be answered as
+  caught-up-or-not and not as a duration. See [Prometheus](#prometheus).
 - **There is no backup command, and a replica is not one.** A replica applies a mistaken delete
   as faithfully as anything else, with no delay and no undo. Backing up means stopping a node
   and copying its directory — which is what a replica is good for, since it gives you a node
