@@ -1,0 +1,47 @@
+name: Go
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        # Whatever Go currently calls stable, which has to be at least the
+        # version in go.mod.
+        go-version: 'stable'
+
+    - name: Build
+      run: go build -v ./...
+
+    - name: Vet
+      run: go vet ./...
+
+    - name: Test
+      run: go test -race -v ./...
+
+    # A short run over each fuzz target, enough to catch a seed that has stopped
+    # passing. The long runs belong on a laptop, not in CI, and the corpus a long
+    # run builds up stays on that laptop: CI starts from the seeds in the code
+    # every time.
+    #
+    # Naming a target that does not exist is not an error to the go tool, only a
+    # warning, so a stale name here fuzzes nothing and says so quietly: check the
+    # names against the FuzzXxx functions in the tests when adding one.
+    - name: Fuzz
+      run: |
+        go test -run xxx -fuzz '^FuzzReadFrame$' -fuzztime 30s ./server/
+        go test -run xxx -fuzz '^FuzzBatchBody$' -fuzztime 30s ./server/
+
+    # Not the mutation sweep. It is ten minutes and it copies the tree eight
+    # times; it belongs on a laptop before a push, which is what AGENTS.md says
+    # to do with it.

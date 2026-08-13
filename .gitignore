@@ -1,0 +1,25 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Where a worker's copy of the tree goes during a mutation sweep.
+.mutate/
+
+# The default -dir. Running the binary from a checkout to try something out
+# should not leave a database in the working tree.
+litekv-data/
+
+# The binary itself, when it is built here rather than installed.
+/litekvd
