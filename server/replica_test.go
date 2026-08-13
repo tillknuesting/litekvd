@@ -264,7 +264,7 @@ func TestAFollowerKeepsUpWhileTheLeaderMerges(t *testing.T) {
 	value := bytes.Repeat([]byte("m"), 400)
 	live := map[string]string{}
 
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		key := fmt.Sprintf("key-%03d", i)
 		if err := up.db.Write([]byte(key), append([]byte(key+"-v"), value...)); err != nil {
 			t.Fatal(err)
@@ -1014,7 +1014,7 @@ func TestCloseWaitsForTheFollower(t *testing.T) {
 				return
 			default:
 			}
-			if err := up.db.Write([]byte(fmt.Sprintf("k-%05d", i)),
+			if err := up.db.Write(fmt.Appendf(nil, "k-%05d", i),
 				bytes.Repeat([]byte("v"), 512)); err != nil {
 				return
 			}
@@ -1507,8 +1507,8 @@ func TestSendingASnapshotDoesNotHoldIt(t *testing.T) {
 	)
 
 	value := bytes.Repeat([]byte("x"), each)
-	for i := 0; i < records; i++ {
-		if err := db.Write([]byte(fmt.Sprintf("key-%05d", i)), value); err != nil {
+	for i := range records {
+		if err := db.Write(fmt.Appendf(nil, "key-%05d", i), value); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1586,8 +1586,8 @@ func TestASnapshotLeavesNoFileBehind(t *testing.T) {
 	up := serving(t, litekv.DBOptions{Sync: litekv.SyncNever})
 	up.api.opts.SpoolDir = spool
 
-	for i := 0; i < 50; i++ {
-		if err := up.db.Write([]byte(fmt.Sprintf("key-%02d", i)), bytes.Repeat([]byte("v"), 4096)); err != nil {
+	for i := range 50 {
+		if err := up.db.Write(fmt.Appendf(nil, "key-%02d", i), bytes.Repeat([]byte("v"), 4096)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1732,8 +1732,8 @@ func TestAFollowerAppliesASnapshotAsItArrives(t *testing.T) {
 	}
 	defer source.Close()
 
-	for i := 0; i < 64; i++ {
-		if err := source.Write([]byte(fmt.Sprintf("key-%02d", i)),
+	for i := range 64 {
+		if err := source.Write(fmt.Appendf(nil, "key-%02d", i),
 			bytes.Repeat([]byte("x"), 16<<10)); err != nil {
 			t.Fatal(err)
 		}

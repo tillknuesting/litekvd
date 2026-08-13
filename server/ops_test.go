@@ -35,7 +35,7 @@ func TestHealthSaysWhetherItCanServe(t *testing.T) {
 func TestMetricsCountWhatWasServed(t *testing.T) {
 	s, _ := newServer(t, Options{})
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		wants(t, do(t, s, http.MethodPut, fmt.Sprintf("/v1/keys/k-%d", i),
 			strings.NewReader("v")), http.StatusNoContent)
 	}
@@ -326,10 +326,10 @@ func TestStreamsAreCountedWhileTheyAreOpen(t *testing.T) {
 	gauge := func() string {
 		t.Helper()
 
-		for _, line := range strings.Split(string(wants(t,
+		for line := range strings.SplitSeq(string(wants(t,
 			do(t, up.api, http.MethodGet, metricsPath, nil), http.StatusOK)), "\n") {
-			if strings.HasPrefix(line, "litekv_replication_streams ") {
-				return strings.TrimPrefix(line, "litekv_replication_streams ")
+			if after, ok := strings.CutPrefix(line, "litekv_replication_streams "); ok {
+				return after
 			}
 		}
 		t.Fatal("there is no litekv_replication_streams in /metrics")

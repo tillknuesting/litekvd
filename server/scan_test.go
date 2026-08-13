@@ -270,7 +270,7 @@ func TestScanEncodesBytesThatAreNotText(t *testing.T) {
 }
 
 func isText(b []byte) bool {
-	for _, line := range bytes.Split(b, []byte("\n")) {
+	for line := range bytes.SplitSeq(b, []byte("\n")) {
 		if _, err := decodePair(line); len(line) > 0 && err != nil {
 			return false
 		}

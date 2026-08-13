@@ -224,14 +224,14 @@ func TestEveryLineKeepsItsOwnBytes(t *testing.T) {
 	const count = 200
 
 	var body strings.Builder
-	for i := 0; i < count; i++ {
+	for i := range count {
 		fmt.Fprintf(&body, "{\"op\":\"write\",\"key\":\"key-%03d\",\"value\":%q}\n",
 			i, strings.Repeat(fmt.Sprintf("%d", i%10), count-i))
 	}
 
 	wants(t, post(t, s, body.String()), http.StatusNoContent)
 
-	for i := 0; i < count; i++ {
+	for i := range count {
 		key := fmt.Sprintf("key-%03d", i)
 		want := strings.Repeat(fmt.Sprintf("%d", i%10), count-i)
 
@@ -386,7 +386,7 @@ func TestBatchBodyIsBoundedAcrossItsLines(t *testing.T) {
 	s, db := newServer(t, Options{MaxBatch: 256})
 
 	var body strings.Builder
-	for i := 0; i < 40; i++ {
+	for i := range 40 {
 		fmt.Fprintf(&body, "{\"op\":\"write\",\"key\":\"k%02d\",\"value\":\"v\"}\n", i)
 	}
 	if body.Len() < 5*256 {

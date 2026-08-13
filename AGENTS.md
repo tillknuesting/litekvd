@@ -38,6 +38,10 @@ What follows from it, practically:
 - **There is no single command that runs both suites.** The engine has its own,
   including chaos runs that fail a disk one operation at a time, and none of that
   is reachable from here.
+- **The one thing that does cross is the mutation runner**, which is a package in
+  the engine module rather than a copy in each repository. Changing it means
+  changing it there, and a sweep here will not see that change until the engine
+  is tagged and this module's `require` is raised.
 
 ## Where things are
 
@@ -55,7 +59,7 @@ What follows from it, practically:
 | `server/acks.go`     | who is following, how far each has got, and what a write waits for |
 | `server/replica.go`  | the frames, the position on the wire, and the leader's stream      |
 | `server/follower.go` | the other end of it: dial, apply, reconnect                        |
-| `tools/mutate/`      | the mutation sweep, and `mutations.go` beside it is what it breaks |
+| `tools/mutate/`      | this repository's own list of what to break, and its timeout       |
 
 `package server` is an `http.Handler` and nothing else: it does not listen, it
 does not open the store, and it does not close it. `main.go` does all three. That
@@ -67,6 +71,7 @@ Everything below has to pass before anything is pushed.
 
 ```bash
 gofmt -l . && go vet ./... && staticcheck ./...
+go fix ./... && git diff --exit-code   # the modernisers, and CI runs it too
 go test -race ./...
 GOMAXPROCS=1 go test ./...
 go test -run xxx -fuzz '^FuzzReadFrame$' -fuzztime 30s ./server/
@@ -77,12 +82,21 @@ go run ./tools/mutate
 The `^...$` matters: `-fuzz FuzzBatch` would match more than one target and the
 go tool refuses to run rather than choosing.
 
+`go fix` rewrites rather than reports, which is why the check is to run it and
+see whether anything moved. Read what it did before committing it, and then run
+the sweep: `mutations.go` matches source text exactly, so an automated rewrite
+is exactly the thing that turns a mutation into a silent SKIP, and the sweep is
+the only check that would notice.
+
 `GOMAXPROCS=1` is not paranoia — the engine's lock shards on it, so a one-core
 machine takes a different path through the store, and background merging stops
 being in the background.
 
 `tools/mutate` is a hundred and nine mutations across eight workers, each in its
-own copy of the repository, printing verdicts as they land:
+own copy of the repository, printing verdicts as they land. The machinery is
+`github.com/tillknuesting/litekv/mutate` — the engine module, which this one
+depends on anyway, so that neither repository holds a copy of a runner. What is
+here is the list and the ninety-second timeout this suite needs:
 
 ```bash
 go run ./tools/mutate                 # all of them

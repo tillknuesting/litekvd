@@ -284,10 +284,10 @@ func TestStatusAndMetricsCountFollowers(t *testing.T) {
 	acked := func() string {
 		t.Helper()
 
-		for _, line := range strings.Split(string(wants(t,
+		for line := range strings.SplitSeq(string(wants(t,
 			do(t, up.api, http.MethodGet, metricsPath, nil), http.StatusOK)), "\n") {
-			if strings.HasPrefix(line, "litekv_replication_followers ") {
-				return strings.TrimPrefix(line, "litekv_replication_followers ")
+			if after, ok := strings.CutPrefix(line, "litekv_replication_followers "); ok {
+				return after
 			}
 		}
 		t.Fatal("there is no litekv_replication_followers in /metrics")

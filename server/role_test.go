@@ -393,8 +393,8 @@ func TestClosingTheServerStopsTheFollower(t *testing.T) {
 	// on being written to; a follower still running would apply it.
 	stopped := db.Applied()
 
-	for i := 0; i < 20; i++ {
-		if err := up.db.Write([]byte(fmt.Sprintf("after-%02d", i)), []byte("v")); err != nil {
+	for i := range 20 {
+		if err := up.db.Write(fmt.Appendf(nil, "after-%02d", i), []byte("v")); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -439,10 +439,10 @@ func TestAFencedLeaderSaysSo(t *testing.T) {
 	gauge := func() string {
 		t.Helper()
 
-		for _, line := range strings.Split(string(wants(t,
+		for line := range strings.SplitSeq(string(wants(t,
 			do(t, s, http.MethodGet, metricsPath, nil), http.StatusOK)), "\n") {
-			if strings.HasPrefix(line, "litekv_fenced ") {
-				return strings.TrimPrefix(line, "litekv_fenced ")
+			if after, ok := strings.CutPrefix(line, "litekv_fenced "); ok {
+				return after
 			}
 		}
 		t.Fatal("there is no litekv_fenced in /metrics")

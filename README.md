@@ -1,22 +1,40 @@
 # litekvd
 
-A small, fast key-value database you can run. One binary, no configuration, no dependencies —
-an HTTP API over a [litekv](https://github.com/tillknuesting/litekv) log-structured store,
-with replication, replicas that refuse stale reads, and Prometheus metrics.
+**A small, fast key-value database you can run.** One binary, no configuration, no
+dependencies — an HTTP API over the [litekv](https://github.com/tillknuesting/litekv)
+log-structured store, with replication, replicas that refuse stale reads, and Prometheus
+metrics.
+
+[![Go](https://github.com/tillknuesting/litekvd/actions/workflows/go.yml/badge.svg)](https://github.com/tillknuesting/litekvd/actions/workflows/go.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/tillknuesting/litekvd.svg)](https://pkg.go.dev/github.com/tillknuesting/litekvd)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 ```bash
 go install github.com/tillknuesting/litekvd@latest
 litekvd
 ```
 
-That is the whole of getting started. It keeps the store in `./litekv-data`, listens on
-`127.0.0.1:8080`, and syncs every write to the disk before answering.
-
 ```bash
 curl -X PUT --data-binary 'ada' http://127.0.0.1:8080/v1/keys/user:1
 curl http://127.0.0.1:8080/v1/keys/user:1
 # ada
 ```
+
+That is the whole of getting started. No config file, no `initdb`, no daemon user, no
+port to choose: the store goes in `./litekv-data`, it listens on `127.0.0.1:8080`, and
+every write is on the disk before it is acknowledged.
+
+|                    |                                                                  |
+| ------------------ | ---------------------------------------------------------------- |
+| **Reach for it**   | a cache that must survive a restart, a config or session store, a sidecar for one service, an embedded database that outgrew being embedded |
+| **Look elsewhere** | anything wanting transactions across keys, secondary indexes, a query language, or automatic failover |
+| **Costs**          | every key in memory (~59 bytes each); values live on the disk    |
+| **Needs**          | Go 1.26 to build. Nothing at all to run                          |
+
+**Contents** — [Install](#install) · [Sixty seconds](#sixty-seconds) ·
+[What it is](#what-it-is) · [Configuration](#configuration) · [The API](#the-api) ·
+[Replication](#replication) · [Operations](#operations) ·
+[Performance](#performance) · [Limitations](#limitations)
 
 ## Install
 

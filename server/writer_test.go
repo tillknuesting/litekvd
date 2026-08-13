@@ -33,12 +33,10 @@ func TestConcurrentWritesAreAllStored(t *testing.T) {
 	const clients, each = 16, 32
 
 	var wg sync.WaitGroup
-	for c := 0; c < clients; c++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for c := range clients {
+		wg.Go(func() {
 
-			for i := 0; i < each; i++ {
+			for i := range each {
 				key := fmt.Sprintf("client-%02d-key-%02d", c, i)
 
 				rec := httptest.NewRecorder()
@@ -50,12 +48,12 @@ func TestConcurrentWritesAreAllStored(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
-	for c := 0; c < clients; c++ {
-		for i := 0; i < each; i++ {
+	for c := range clients {
+		for i := range each {
 			key := fmt.Sprintf("client-%02d-key-%02d", c, i)
 
 			body := wants(t, do(t, s, http.MethodGet, "/v1/keys/"+key, nil), http.StatusOK)
@@ -114,7 +112,7 @@ func TestNoGoroutineLeak(t *testing.T) {
 
 	before := runtime.NumGoroutine()
 
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		s := New(db, Options{Logger: quiet()})
 
 		wants(t, do(t, s, http.MethodPut, "/v1/keys/k", strings.NewReader("v")), http.StatusNoContent)

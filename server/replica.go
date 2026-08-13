@@ -521,9 +521,7 @@ func (s *Server) streamReplica(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if beat := s.opts.heartbeat(); beat > 0 {
-		beating.Add(1)
-		go func() {
-			defer beating.Done()
+		beating.Go(func() {
 
 			ticker := time.NewTicker(beat)
 			defer ticker.Stop()
@@ -543,7 +541,7 @@ func (s *Server) streamReplica(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
-		}()
+		})
 	}
 
 	send := func(batch []byte, next litekv.DBPosition) error {
