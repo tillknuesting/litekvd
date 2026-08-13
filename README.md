@@ -416,6 +416,60 @@ log instead.
 
 ## Replication
 
+### What it is for
+
+A replica is a second machine holding the same records, kept up to date as they are written.
+It buys three things, and they are worth separating because you may want only one of them and
+the cost of each is different.
+
+**A live second copy, for when a machine goes away.** A disk that fails or a host that does
+not come back takes the store with it. A replica means the data is also somewhere else,
+seconds behind rather than however old your last copy is. This is the reason most people
+want it and it is the one that needs no extra flags.
+
+**Reads served from somewhere else.** Replicas answer reads, so read-heavy work can be spread
+across them while writes go to one node. What this costs is that a replica can be behind: a
+read there may not show a write that has already been acknowledged. The `Litekv-After` header
+below is the fix — a client that just wrote can insist on a replica that has caught up, and
+get 412 instead of a stale answer.
+
+**A failover that takes seconds rather than an evening.** If the leader is gone and there is a
+replica, `POST /v1/promote` makes it the leader and the application is pointed at it. Without
+one, recovery means finding a copy of the data and restoring it. Note what this is not:
+nothing here *decides* that a failover should happen. A person or an external lease does; see
+[Limitations](#limitations).
+
+### When it is not worth it
+
+**On one machine it buys nothing.** A replica in another directory on the same host survives
+neither the disk nor the host, which are the two failures it exists for. It is useful for
+trying the mechanics out, and that is all.
+
+**If restoring from a copy is fast enough, this is more moving parts than you need.** Two
+processes, two directories, and a decision to make when one of them dies.
+
+**It is not a backup, and this is the important one.** A replica applies whatever the leader
+did, immediately — including a `DELETE` of the wrong key, or a batch that wiped something.
+There is no delay and no undo, so a replica protects you from a machine and not from
+yourself. A backup here is stopping a node and copying its directory (running a replica gives
+you a node you can stop without downtime). There is no backup command; see
+[Limitations](#limitations).
+
+### What it costs
+
+| what                        | cost                                                              |
+| --------------------------- | ------------------------------------------------------------------ |
+| a replica attached          | one copy of each batch out of the leader's memory as it is sent; ten replicas is ten copies |
+| a replica catching up       | a snapshot of the live records, spooled to `-spool-dir` on the leader |
+| `-wait-for 1`               | a write goes from 8.3 µs to 215 µs — a round trip to the follower and back |
+| a stale read you cannot have | 412, and the client asks again or asks the leader                 |
+
+Asynchronous replication is the default and costs a write nothing. `-wait-for` is what you add
+when losing an acknowledged write in a failover is worse than the latency, and it is a real
+trade rather than a setting to turn on for safety's sake.
+
+### Setting one up
+
 A follower is a second `litekvd` pointed at the first:
 
 ```bash
@@ -683,6 +737,18 @@ Read these before choosing this, not after.
   that — the lock needs `flock`, which those platforms do not have in Go's standard library.
 - **Expiry is checked on read, not swept.** A store full of expired records is as large as a store
   full of live ones until the next merge.
+- **There is no backup command, and a replica is not one.** A replica applies a mistaken delete
+  as faithfully as anything else, with no delay and no undo. Backing up means stopping a node
+  and copying its directory — which is what a replica is good for, since it gives you a node
+  you can stop without taking the service down.
+
+  Copying a directory from *under* a running node is the thing to be careful about, and not
+  for the reason it looks like. The store survives being killed at any instant, so a
+  point-in-time image of the directory is fine — a filesystem snapshot works. `cp -r` is not
+  point-in-time: it reads the files over a period, and a merge landing in the middle of that
+  can rename and remove logs between two of its reads, leaving a copy holding a set of logs
+  that never existed together. `-merge-trigger 1` turns merging off if you want to copy a
+  live directory anyway.
 
 ## The engine underneath
 
