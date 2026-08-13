@@ -1,9 +1,13 @@
 # litekvd
 
-**A small, fast key-value database you can run.** One binary, no configuration, no
-dependencies — an HTTP API over the [litekv](https://github.com/tillknuesting/litekv)
-log-structured store, with replication, replicas that refuse stale reads, and Prometheus
-metrics.
+**litekvd serves a key-value store over HTTP.** It is one binary with no dependencies
+outside the Go standard library, and it runs without configuration. Storage is
+[litekv](https://github.com/tillknuesting/litekv), a Bitcask-style log-structured engine:
+writes append to a log, a read is one index lookup and one read, and every key is held in
+memory while values stay on the disk.
+
+It has replication with leader and replica roles, optional semi-synchronous writes, reads
+that can refuse a replica that has not caught up, and Prometheus metrics.
 
 [![Go](https://github.com/tillknuesting/litekvd/actions/workflows/go.yml/badge.svg)](https://github.com/tillknuesting/litekvd/actions/workflows/go.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/tillknuesting/litekvd.svg)](https://pkg.go.dev/github.com/tillknuesting/litekvd)
@@ -24,12 +28,14 @@ That is the whole of getting started. No config file, no `initdb`, no daemon use
 port to choose: the store goes in `./litekv-data`, it listens on `127.0.0.1:8080`, and
 every write is on the disk before it is acknowledged.
 
-|                    |                                                                  |
-| ------------------ | ---------------------------------------------------------------- |
-| **Reach for it**   | a cache that must survive a restart, a config or session store, a sidecar for one service, an embedded database that outgrew being embedded |
-| **Look elsewhere** | anything wanting transactions across keys, secondary indexes, a query language, or automatic failover |
-| **Costs**          | every key in memory (~59 bytes each); values live on the disk    |
-| **Needs**          | Go 1.26 to build. Nothing at all to run                          |
+|                     |                                                                 |
+| ------------------- | ---------------------------------------------------------------- |
+| **Data model**      | one flat keyspace; keys and values are arbitrary bytes            |
+| **Durability**      | every write synced to the disk before it is acknowledged, by default |
+| **Memory**          | every key held in memory, about 59 bytes each; values on the disk |
+| **Not provided**    | transactions across keys, secondary indexes, a query language, automatic failover |
+| **Build and run**   | Go 1.26 to build; no runtime dependencies                        |
+| **Measured**        | 779 ns per write through the handler at ten concurrent writers, `-sync always`; 215 µs when waiting for a follower |
 
 **Contents** — [Install](#install) · [Sixty seconds](#sixty-seconds) ·
 [What it is](#what-it-is) · [Configuration](#configuration) · [The API](#the-api) ·
