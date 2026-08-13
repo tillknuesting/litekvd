@@ -45,6 +45,11 @@ type controller struct {
 	// from the API server stops acting before its Lease could be handed on.
 	held time.Time
 
+	// seenVersion and seenAt are the last resourceVersion this controller saw on
+	// the Lease and when it saw it, by its own clock. See stale.
+	seenVersion string
+	seenAt      time.Time
+
 	// unreachableSince is when the leader stopped answering. Reset the moment
 	// it answers again, which is what makes -grace a run of failures rather
 	// than an aggregate of them.

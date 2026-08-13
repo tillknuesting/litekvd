@@ -95,6 +95,14 @@ and that is a decision about your data rather than a tuning knob.
 Ready. A controller that can reach nothing is far likelier to be the broken
 thing than to be the last witness of everything else breaking.
 
+**It does not compare clocks.** A Lease's `renewTime` was written by another
+machine, and a controller whose clock runs fast would find every Lease expired
+and seize it while the holder was renewing happily — two controllers acting at
+once, produced by the very thing meant to prevent it. What is watched instead is
+`resourceVersion`: while it keeps changing somebody is renewing, and when it
+stops changing for a lease duration *by this controller's own clock*, they are
+not. Every duration is measured on one clock and it does not matter which.
+
 **It will not act on a stale Lease.** A round polls every pod, and each of those
 can wait out `-probe-timeout`; a round that took longer than half the Lease
 duration does nothing and comes back. That is the window where two controllers
@@ -124,6 +132,19 @@ answer "which got furthest" and cannot do it with two base64 strings.
 directly**, bypassing the Service. Nothing here can: fencing is something a
 store is *told*, and the old leader is told only when something carrying the
 newer term talks to it. Traffic is moved, not amputated.
+
+This is not a theoretical edge. It was produced deliberately: the leader's node
+was frozen with `docker pause` — alive, holding its data, answering nothing —
+the controller failed over after 14s, and then the node was thawed. The old
+leader woke reporting `role=leader term=0 fenced=false`, out of both Services and
+entirely unaware. A write sent straight to its pod IP was **accepted, readable on
+that node, and invisible to the real leader**. Those records are lost when its
+volume is eventually wiped.
+
+The thing that would close it is `DB.Demote` and a `/v1/demote` route — already
+on the engine's roadmap — which would let the controller stand a stale leader
+down rather than only starve it of traffic. Until then, a client that talks to
+pod IPs instead of the Service is outside what any of this can promise.
 
 What the controller does do is keep it out of both Services — by name for
 writes, and by taking the `litekv.io/serving` label off it for reads, every

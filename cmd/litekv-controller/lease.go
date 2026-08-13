@@ -66,12 +66,8 @@ func (c *controller) acquire(ctx context.Context) (bool, error) {
 	}
 
 	mine := current.Spec.HolderIdentity == c.identity
-	expired := true
-	if renewed, perr := time.Parse(microTime, current.Spec.RenewTime); perr == nil {
-		expired = now.Sub(renewed) > time.Duration(current.Spec.LeaseDurationSeconds)*time.Second
-	}
 
-	if !mine && !expired {
+	if !mine && !c.stale(current, now) {
 		return false, nil
 	}
 	if mine {
@@ -96,6 +92,36 @@ func (c *controller) acquire(ctx context.Context) (bool, error) {
 	}
 	c.held = now
 	return true, nil
+}
+
+// stale reports whether the holder has stopped renewing, without comparing two
+// clocks.
+//
+// The obvious version subtracts the Lease's renewTime from time.Now(), and it is
+// wrong in a way that only shows up when it matters: renewTime was written by
+// another machine's clock. A controller running an hour fast finds every lease
+// expired and takes it on the first round, while the real holder is renewing
+// happily — two controllers acting at once, which is the one thing the Lease
+// exists to prevent, produced by the mechanism meant to prevent it.
+//
+// So no timestamp from the object is used for the decision. What is watched is
+// resourceVersion, which the API server changes on every write: while it keeps
+// changing somebody is alive and renewing, and when it stops changing for
+// longer than a lease duration *by this controller's own clock*, they are not.
+// Every duration is measured on one clock, and which clock that is does not
+// matter.
+//
+// The first sight of a Lease is never stale, whatever its timestamps say. That
+// costs one lease duration after a controller starts, before it will take over
+// an abandoned Lease — which is the right way round: slow to seize, quick to
+// keep.
+func (c *controller) stale(current *lease, now time.Time) bool {
+	if current.Metadata.ResourceVersion != c.seenVersion {
+		c.seenVersion = current.Metadata.ResourceVersion
+		c.seenAt = now
+		return false
+	}
+	return now.Sub(c.seenAt) > time.Duration(current.Spec.LeaseDurationSeconds)*time.Second
 }
 
 // dropLease gives the Lease back on the way out, so that another controller can

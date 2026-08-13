@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"testing"
+	"time"
 )
 
 // The policy is the dangerous part of this program. The plumbing either works
@@ -232,5 +234,52 @@ func TestAWriteTargetThatIsFollowingIsPromoted(t *testing.T) {
 	}
 	if !c.unreachableSince.IsZero() {
 		t.Error("a write target that is following was treated as unreachable")
+	}
+}
+
+// TestALeaseIsJudgedWithoutComparingClocks.
+//
+// The obvious expiry check subtracts the Lease's renewTime from time.Now(), and
+// it is wrong in a way that only appears when it matters: renewTime was written
+// by another machine's clock. This is that scenario — a peer renewing steadily
+// while this controller's clock runs an hour fast — and the answer must be that
+// the Lease is held, not that it is free.
+func TestALeaseIsJudgedWithoutComparingClocks(t *testing.T) {
+	c := &controller{log: quiet(), leaseDuration: 15 * time.Second}
+
+	held := &lease{Spec: leaseSpec{
+		HolderIdentity:       "the-other-controller",
+		LeaseDurationSeconds: 15,
+		// Written by a clock an hour behind this one, which is what skew looks
+		// like from here. A check that subtracted this from now would call it
+		// expired by a factor of two hundred.
+		RenewTime: time.Now().Add(-time.Hour).UTC().Format(microTime),
+	}}
+	held.Metadata.ResourceVersion = "100"
+
+	now := time.Now()
+	if c.stale(held, now) {
+		t.Fatal("the first sight of a Lease was called stale; that is a clock comparison")
+	}
+
+	// It keeps being renewed: a new resourceVersion every round, and its
+	// timestamps stay an hour behind. Never stale, however long this runs.
+	for i := range 20 {
+		held.Metadata.ResourceVersion = fmt.Sprintf("%d", 101+i)
+		now = now.Add(5 * time.Second)
+		if c.stale(held, now) {
+			t.Fatalf("a Lease being renewed was called stale on round %d", i)
+		}
+	}
+
+	// And when the holder stops — the resourceVersion stops moving — it goes
+	// stale on this controller's own clock, and only then.
+	now = now.Add(10 * time.Second)
+	if c.stale(held, now) {
+		t.Error("called stale before a full lease duration of silence")
+	}
+	now = now.Add(6 * time.Second)
+	if !c.stale(held, now) {
+		t.Error("a holder that stopped renewing was never called stale")
 	}
 }
