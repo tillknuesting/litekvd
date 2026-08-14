@@ -37,6 +37,24 @@ There is no authentication. Anything that can reach the Service can read and
 write the whole store. Set auth.enabled=true, and note there is still no TLS.
 {{- end }}
 
+{{- if .Values.controller.enabled }}
+The controller is on. If the leader stops answering for {{ .Values.controller.grace }} it will
+promote the replica that got furthest and move the write Service to it. It
+holds a Lease, so only one of its replicas ever acts.
+
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/component=controller -f
+
+It refuses to fail over a cluster replicating asynchronously, because an
+acknowledged write may then exist only on the node that has gone.
+{{- if not .Values.config.waitFor }}
+config.waitFor is 0, which is that case: nothing will be failed over until you
+set it. See deploy/README.md.
+{{- end }}
+{{- else }}
 THERE IS NO AUTOMATIC FAILOVER. If the leader goes, writes stop until somebody
 promotes a replica. That is deliberate — two nodes raising the term at once
 gives the guarantee away — and the runbook is in deploy/README.md.
+
+Set controller.enabled=true for a controller that does it for you, using a
+Kubernetes Lease so that exactly one thing decides.
+{{- end }}
