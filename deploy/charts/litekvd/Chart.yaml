@@ -3,10 +3,13 @@ name: litekvd
 description: A key-value store served over HTTP, with a leader and read replicas.
 type: application
 
-# The chart's own version, bumped when the templates change. appVersion is the
-# litekvd release it installs by default, and the two move independently.
-version: 0.1.0
-appVersion: "1.0.0"
+# Both are set from the tag when the release workflow packages this, so that a
+# published chart cannot install an image from six months ago. What is written
+# here is what `helm install ./deploy/charts/litekvd` uses, which is the
+# development path — keep it on the last release rather than ahead of it, since
+# image.tag is empty by default and takes appVersion.
+version: 1.0.1
+appVersion: "1.0.1"
 
 home: https://github.com/tillknuesting/litekvd
 sources:
