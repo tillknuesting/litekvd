@@ -31,12 +31,23 @@ COPY . .
 # table and -w the DWARF, together about a third of the size; what they cost is
 # a stack trace with no line numbers, which is a trade worth naming rather than
 # copying — if you are chasing a panic in production, build without them.
+# buildx sets these; the legacy builder leaves them empty, and that difference
+# used to be a bug worth naming. They were written GOARCH=${TARGETARCH:-arm64},
+# so a plain `docker build` on an amd64 machine produced an arm64 image — one
+# that runs nowhere it was meant to, having reported success. Most clusters are
+# amd64, so the default was wrong for very nearly everybody.
+#
+# Empty is the right value to pass through rather than a guess: go build with an
+# empty GOOS or GOARCH uses the toolchain's own defaults, which inside this
+# container are the platform the build is running on. So buildx cross-compiles
+# because it says which platform, and a plain build targets itself because
+# nobody said.
 ARG TARGETOS
 ARG TARGETARCH
 ENV CGO_ENABLED=0
-RUN GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-arm64} \
+RUN GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" -o /litekvd . \
- && GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-arm64} \
+ && GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" -o /litekv-controller ./cmd/litekv-controller
 
 # Assembled here because scratch has no shell to assemble them in.

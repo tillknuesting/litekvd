@@ -86,6 +86,28 @@ func envOr(name, fallback string) string {
 	return fallback
 }
 
+// logger builds the one this process logs through.
+//
+// Text by default because the first thing anybody does is run it in a terminal,
+// and JSON there is a wall of braces. Anything running under an orchestrator is
+// being scraped rather than read, so the chart asks for json — see the log-format
+// flag.
+func logger(format, level string) (*slog.Logger, error) {
+	var at slog.Level
+	if err := at.UnmarshalText([]byte(level)); err != nil {
+		return nil, fmt.Errorf("-log-level %q: want debug, info, warn or error", level)
+	}
+
+	opts := &slog.HandlerOptions{Level: at}
+	switch format {
+	case "text":
+		return slog.New(slog.NewTextHandler(os.Stderr, opts)), nil
+	case "json":
+		return slog.New(slog.NewJSONHandler(os.Stderr, opts)), nil
+	}
+	return nil, fmt.Errorf("-log-format %q: want text or json", format)
+}
+
 func run() error {
 	var (
 		dir = flag.String("dir", envOr("LITEKV_DIR", defaultDir),
@@ -140,7 +162,14 @@ func run() error {
 		writeTimeout = flag.Duration("write-timeout", 60*time.Second,
 			"how long a response has to be written. Replication streams are exempt and set no deadline,\n"+
 				"since a stream is a response meant to still be going next week; 0 turns it off")
-		shutdown = flag.Duration("shutdown-timeout", 10*time.Second, "how long requests in flight get once the server is asked to stop")
+		shutdown  = flag.Duration("shutdown-timeout", 10*time.Second, "how long requests in flight get once the server is asked to stop")
+		logFormat = flag.String("log-format", "text",
+			"text or json. text is for a person reading a terminal, which is what running this by hand\n"+
+				"is; json is for anything that ships logs somewhere, since a line nothing can parse is a\n"+
+				"line nobody will ever query. The chart sets json")
+		logLevel = flag.String("log-level", "info",
+			"debug, info, warn or error. Requests are logged at debug, so this is the switch for request\n"+
+				"logging: a server logging every request at info is a server whose log nobody reads")
 	)
 	flag.Parse()
 
@@ -162,7 +191,10 @@ func run() error {
 		return err
 	}
 
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	log, err := logger(*logFormat, *logLevel)
+	if err != nil {
+		return err
+	}
 
 	db, err := litekv.OpenDB(*dir, litekv.DBOptions{
 		Sync:         policy,

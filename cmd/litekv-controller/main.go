@@ -98,6 +98,9 @@ func run() error {
 
 		tokenFile = flag.String("token-file", "",
 			"file holding litekvd's bearer token, when the cluster has one set")
+		logFormat = flag.String("log-format", "text",
+			"text or json. text is for a person reading a terminal; json is for anything that ships logs\n"+
+				"somewhere, since a line nothing can parse is a line nobody will ever query. The chart sets json")
 		verbose = flag.Bool("verbose", false, "log every poll rather than only decisions")
 	)
 	flag.Parse()
@@ -125,7 +128,21 @@ func run() error {
 	if *verbose {
 		level = slog.LevelDebug
 	}
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+
+	// -verbose stays rather than becoming -log-level, because it means one
+	// thing here and means it clearly: every poll, not only the decisions. A
+	// level flag would be a second way to say the same thing and a question
+	// about which wins.
+	opts := &slog.HandlerOptions{Level: level}
+	var log *slog.Logger
+	switch *logFormat {
+	case "text":
+		log = slog.New(slog.NewTextHandler(os.Stderr, opts))
+	case "json":
+		log = slog.New(slog.NewJSONHandler(os.Stderr, opts))
+	default:
+		return fmt.Errorf("-log-format %q: want text or json", *logFormat)
+	}
 
 	api, err := inCluster()
 	if err != nil {

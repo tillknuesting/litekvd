@@ -30,6 +30,16 @@ replicas: 2
 # failure this whole arrangement exists to prevent.
 leaderPodName: ""
 
+# text or json. json here and not text, because a pod's logs are collected by
+# something rather than read in a terminal, and a line Loki cannot parse is a
+# line nobody will ever query.
+logFormat: json
+
+# debug, info, warn or error. Requests are logged at debug, so this is the
+# switch for request logging: a server logging every request at info is a server
+# whose log nobody reads.
+logLevel: info
+
 service:
   port: 8080
   # The Service in front of the leader, which is where writes go. Its selector
@@ -188,6 +198,52 @@ controller:
       memory: 32Mi
     limits:
       memory: 64Mi
+
+# Who may reach the store on the network.
+#
+# Off by default, and that is a judgement rather than an oversight. Turning it
+# on means naming your clients in allowFrom, and a client you forget cannot
+# reach the database at all — an install that comes up broken teaches people to
+# turn this off rather than to configure it. It is also consistent with
+# auth.enabled being off: the chart starts open and asks you to close it.
+#
+# Close it. This is a database that holds values in the clear, with at most a
+# shared token and no TLS, so without a policy the real posture is that anything
+# in the cluster which can route to a pod IP can read and write every key. That
+# is also the hole behind a limitation in deploy/README.md: a stale leader
+# reached directly by pod IP will accept writes.
+networkPolicy:
+  enabled: false
+
+  # Extra sources allowed to reach port 8080 — your applications. Raw
+  # NetworkPolicy peers, so anything valid there works:
+  #
+  #   allowFrom:
+  #     - podSelector:
+  #         matchLabels:
+  #           app.kubernetes.io/name: my-api
+  #     - namespaceSelector:
+  #         matchLabels:
+  #           kubernetes.io/metadata.name: production
+  allowFrom: []
+
+  # Who may scrape /metrics, which is usually Prometheus in another namespace —
+  # and a podSelector on its own only ever means this one, so a namespace has to
+  # be named:
+  #
+  #   metricsFrom:
+  #     - namespaceSelector:
+  #         matchLabels:
+  #           kubernetes.io/metadata.name: monitoring
+  metricsFrom: []
+
+  # Restricting what the store may dial, which is a separate decision because
+  # getting it wrong is silent: a follower that cannot reach its leader looks
+  # like one that is merely behind. When on, DNS and the other litekvd pods are
+  # allowed, and anything else you need goes in allowTo.
+  egress:
+    enabled: false
+    allowTo: []
 
 serviceAccount:
   create: true

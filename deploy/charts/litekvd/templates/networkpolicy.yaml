@@ -1,0 +1,116 @@
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "litekvd.fullname" . }}
+  labels: {{- include "litekvd.labels" . | nindent 4 }}
+spec:
+  # Every litekvd pod, leader and replica alike. Not the controller: it needs to
+  # reach these and is not one of them, and it appears below as a client.
+  podSelector:
+    matchLabels: {{- include "litekvd.selectorLabels" . | nindent 6 }}
+
+  # Ingress only unless egress is turned on separately. Restricting what a
+  # database may dial is easy to get wrong in a way that is silent — a follower
+  # that cannot reach its leader looks like a follower that is merely behind —
+  # so it is a decision on its own, below.
+  policyTypes:
+    - Ingress
+    {{- if .Values.networkPolicy.egress.enabled }}
+    - Egress
+    {{- end }}
+
+  ingress:
+    - from:
+        # The pods themselves. Replication is peer to peer over this same port:
+        # a follower dials the leader's Service, which resolves to one of these.
+        # Leave this out and replication stops, which is the first thing anybody
+        # breaks when writing one of these by hand.
+        - podSelector:
+            matchLabels: {{- include "litekvd.selectorLabels" . | nindent 14 }}
+        {{- if .Values.controller.enabled }}
+        # The controller, which polls /v1/status on every pod and posts to
+        # /v1/promote and /v1/follow. It selects on the immutable component
+        # label rather than on litekv.io/role, for the reason _helpers.tpl
+        # gives: the role moves, and a selector that follows it stops matching
+        # the pod it meant.
+        - podSelector:
+            matchLabels:
+              {{- include "litekvd.selectorLabels" . | nindent 14 }}
+              app.kubernetes.io/component: controller
+        {{- end }}
+        {{- with .Values.networkPolicy.allowFrom }}
+        # Your clients. Nothing else in the cluster can reach the store once
+        # this is on, which is the point of turning it on.
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      ports:
+        - port: http
+          protocol: TCP
+
+    {{- with .Values.networkPolicy.metricsFrom }}
+    # Prometheus, which usually lives in another namespace and therefore needs
+    # naming separately — a podSelector alone only ever means this namespace.
+    #
+    # It is a rule of its own rather than another entry above because scraping
+    # is a different permission from reading the database, even though both
+    # arrive on the same port. Keeping them apart is what lets you say "these
+    # may scrape" without also saying "these may read every key".
+    - from: {{- toYaml . | nindent 8 }}
+      ports:
+        - port: http
+          protocol: TCP
+    {{- end }}
+
+  {{- if .Values.networkPolicy.egress.enabled }}
+  egress:
+    # DNS first, and it is the one everybody forgets. A follower's -leader is a
+    # Service name, so a store that cannot resolve cannot replicate — and it
+    # fails as a connection error every few seconds rather than as anything that
+    # says "DNS".
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+
+    # The other litekvd pods, which is replication itself.
+    - to:
+        - podSelector:
+            matchLabels: {{- include "litekvd.selectorLabels" . | nindent 14 }}
+      ports:
+        - port: http
+          protocol: TCP
+
+    {{- with .Values.networkPolicy.egress.allowTo }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- if and .Values.networkPolicy.enabled .Values.controller.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "litekvd.fullname" . }}-controller
+  labels: {{- include "litekvd.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "litekvd.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: controller
+  # The controller serves nothing. It only makes requests — to the store's pods
+  # and to the Kubernetes API server — so an ingress rule with no sources is the
+  # right shape: it denies everything inbound and says so deliberately rather
+  # than by omission.
+  policyTypes:
+    - Ingress
+  ingress: []
+{{- end }}

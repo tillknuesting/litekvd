@@ -358,6 +358,58 @@ the loss, wipe the old leader's volume, and let it come back as a follower and
 take a snapshot. Which is right depends on what the old leader had that nobody
 else did, and that is a judgement rather than a command.
 
+## Shutting the network down
+
+The chart ships a NetworkPolicy, off by default:
+
+```yaml
+networkPolicy:
+  enabled: true
+  allowFrom:
+    - podSelector:
+        matchLabels:
+          app.kubernetes.io/name: my-api
+  metricsFrom:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: monitoring
+```
+
+**Turn it on.** Without it the real posture is that anything in the cluster which can route to a
+pod IP can read and write every key: this is a database holding values in the clear, with at most
+a shared token and no TLS. It is also the hole behind the limitation below — a stale leader reached
+directly by pod IP will accept writes, and a policy is what stops anything being in a position to
+try.
+
+It is off by default for the same reason `auth.enabled` is: an install that comes up broken teaches
+people to switch the feature off rather than to configure it, and a client you forget to name in
+`allowFrom` cannot reach the database at all.
+
+What it allows, and why each one is there:
+
+- **The litekvd pods themselves.** Replication is peer to peer over the same port, so leaving this
+  out stops replication — the first thing anybody breaks writing one of these by hand.
+- **The controller**, which polls `/v1/status` and posts to `/v1/promote` and `/v1/follow`. It is
+  selected on the immutable `app.kubernetes.io/component`, never on `litekv.io/role`: the role moves
+  during a failover and a selector that follows it stops matching the pod it meant.
+- **Whoever you name** in `allowFrom`, and separately in `metricsFrom` — scraping is a different
+  permission from reading the database even though both arrive on the same port, and Prometheus is
+  usually in another namespace, which a `podSelector` alone never reaches.
+
+The controller gets a policy of its own with `ingress: []`. It serves nothing, so denying everything
+inbound deliberately beats leaving it unstated.
+
+**`kubectl port-forward` keeps working**, because that traffic comes from the kubelet rather than
+from another pod. Verified on a cluster with the policy on: a write through a forwarded port
+answered 204 with `Litekv-Replicated: 2`, so both followers were still reachable, and the controller
+logged no errors.
+
+**Egress is a separate switch and defaults off.** Getting it wrong is silent — a follower that
+cannot reach its leader looks like one that is merely behind — so it is not something to turn on by
+accident. With `networkPolicy.egress.enabled` it allows DNS and the other litekvd pods, and anything
+else goes in `allowTo`. DNS is the one everybody forgets: a follower's `-leader` is a Service name,
+so a store that cannot resolve cannot replicate.
+
 ## Operating it
 
 **The leader will not be evicted.** `podDisruptionBudget.leaderMaxUnavailable`

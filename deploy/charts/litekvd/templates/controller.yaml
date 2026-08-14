@@ -54,6 +54,7 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
             - -port={{ .Values.service.port }}
+            - -log-format={{ .Values.logFormat }}
             - -grace={{ .Values.controller.grace }}
             - -interval={{ .Values.controller.interval }}
             - -lease-duration={{ .Values.controller.leaseDuration }}

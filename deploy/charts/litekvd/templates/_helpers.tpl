@@ -106,6 +106,10 @@ or -segment-size are a pair that works until the day it does not.
 {{- if .Values.auth.enabled }}
 - -token-file=/etc/litekvd/token
 {{- end }}
+{{- /* Anything running here is scraped rather than read, and a log line that
+       nothing can parse is one nobody will ever query. */}}
+- -log-format={{ .Values.logFormat }}
+- -log-level={{ .Values.logLevel }}
 {{- end -}}
 
 {{/*

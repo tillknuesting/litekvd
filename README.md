@@ -148,6 +148,8 @@ somewhere else also read an environment variable.
 | `-write-timeout`    | how long a response has to be written (streams exempt)         | 60s                |
 | `-idle-timeout`     | how long an idle keep-alive connection is held                 | 120s               |
 | `-shutdown-timeout` | how long requests in flight get once it is asked to stop       | 10s                |
+| `-log-format`       | `text` or `json`                                               | `text`             |
+| `-log-level`        | `debug`, `info`, `warn` or `error`                             | `info`             |
 
 `-sync` defaults to `always` because the engine does: a binary that quietly weakened durability
 relative to the code it wraps would be the wrong kind of convenient. `-sync every` is the usual
@@ -754,9 +756,19 @@ forgotten, and `TestEveryRouteIsCounted` holds it there.
 
 ### Logs
 
-Requests are logged at Debug, so turning request logging on is a level rather than a flag. A
-server logging every request at Info is a server whose log nobody reads, and the failures that
-matter log themselves already.
+Requests are logged at debug, so `-log-level debug` is the switch for request logging. A server
+logging every request at info is a server whose log nobody reads, and the failures that matter log
+themselves already.
+
+`-log-format json` for anything that ships its logs somewhere — a line Loki or CloudWatch cannot
+parse is a line nobody will ever query. The default is `text`, because the first thing anybody does
+is run this in a terminal and JSON there is a wall of braces. The Helm chart sets `json`, since a
+pod's output is collected rather than read.
+
+```
+time=2026-08-14T17:12:59+02:00 level=INFO msg=serving addr=127.0.0.1:8080 sync=always keys=0
+{"time":"2026-08-14T17:13:03Z","level":"INFO","msg":"serving","addr":"127.0.0.1:8080","keys":0}
+```
 
 ### Keeping strangers out
 
