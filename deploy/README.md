@@ -389,11 +389,22 @@ checks found the *test* wanting rather than the code:
   corpse reached the same listener and the count was identical — and an empty
   pod IP does not separate them either, since Go reads `http://:8080` as
   localhost. The stand-in records the `Host` each promotion carried.
-- One mutation is still surviving and is written up in `kube.go`: swapping
-  strategic merge patch for a plain JSON merge patch on the Service selector.
-  Both are believed to merge a map key by key, so it may be no change at all.
-  Settling it needs one patch of each against a real API server; until somebody
-  does that, the line is not to be "simplified".
+- One mutation survived and was left open for a while: swapping strategic merge
+  patch for a plain JSON merge patch on the Service selector. Neither the unit
+  tests nor the stand-in could tell them apart, because the stand-in merges
+  either way. It was settled by patching a real Service both ways —
+
+  ```
+  before            {instance: lk, name: litekvd, pod-name: lk-litekvd-0}
+  after json-merge  {instance: lk, name: litekvd, pod-name: promoted-A}
+  after strategic   {instance: lk, name: litekvd, pod-name: promoted-B}
+  ```
+
+  — identical, because strategic merge patch only differs on lists with a patch
+  strategy and `spec.selector` is a plain map. So it is an equivalent mutant and
+  there is deliberately no entry for it. The controller speaks one patch type
+  now instead of two, which is a simplification the measurement paid for; and
+  `null` removing a label was checked the same way rather than assumed.
 
 ## What testing found
 

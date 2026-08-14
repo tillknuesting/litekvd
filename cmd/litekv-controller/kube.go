@@ -204,18 +204,23 @@ func (k *kube) service(ctx context.Context, namespace, name string) (*service, e
 
 // point sets one key of a Service's selector, leaving the rest alone.
 //
-// A merge patch of a nested object replaces only the keys named, which is what
+// A merge patch of a nested object touches only the keys named, which is what
 // is wanted: the selector keeps its app labels and changes which pod it means.
 //
-// Strategic merge patch rather than a plain JSON merge patch, and that choice
-// is UNVERIFIED. Both are believed to merge a map like spec.selector key by
-// key, so swapping one for the other may well be no change at all — a mutation
-// doing exactly that survives, and the stand-in in the tests merges either way
-// because it does not model the difference. What would settle it is one patch
-// of each against a real API server, checking whether the app labels survive;
-// until somebody does that, do not "simplify" this line, because the failure it
-// would cause is a Service whose selector lost its app labels and now selects
-// every pod in the namespace.
+// One patch type for both this and label, and that is now a measured choice
+// rather than a guess. This used to send strategic-merge-patch, on a hunch that
+// a plain merge patch might replace the map instead of merging into it — which
+// would have left a Service selecting every pod in the namespace. Both were
+// tried against a real API server on a selector with three keys, setting one:
+//
+//	before            {instance: lk, name: litekvd, pod-name: lk-litekvd-0}
+//	after json-merge  {instance: lk, name: litekvd, pod-name: promoted-A}
+//	after strategic   {instance: lk, name: litekvd, pod-name: promoted-B}
+//
+// Identical. Strategic merge patch only differs on lists with a patch strategy,
+// and spec.selector is a plain map, so the two agree here and the program is
+// better for speaking one of them. A mutation swapping them is an equivalent
+// mutant and there is deliberately no entry for it.
 func (k *kube) point(ctx context.Context, namespace, name, key, value string) error {
 	patch, err := json.Marshal(map[string]any{
 		"spec": map[string]any{"selector": map[string]string{key: value}},
@@ -224,11 +229,16 @@ func (k *kube) point(ctx context.Context, namespace, name, key, value string) er
 		return err
 	}
 	path := fmt.Sprintf("/api/v1/namespaces/%s/services/%s", namespace, name)
-	return k.do(ctx, http.MethodPatch, path, "application/strategic-merge-patch+json", patch, nil)
+	return k.do(ctx, http.MethodPatch, path, "application/merge-patch+json", patch, nil)
 }
 
 // label sets or removes one label on a pod. An empty value removes it, which in
-// a JSON merge patch is a null.
+// a JSON merge patch is a null — checked against a real API server rather than
+// assumed, since "the key is set to the string null" and "the key is gone" look
+// the same until something selects on it:
+//
+//	before  {app: x, litekv.io/serving: true}
+//	after   {app: x}
 func (k *kube) label(ctx context.Context, namespace, name, key, value string) error {
 	var labels map[string]any
 	if value == "" {
