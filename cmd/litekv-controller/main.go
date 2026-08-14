@@ -69,6 +69,9 @@ func run() error {
 		identity = flag.String("identity", envOr("POD_NAME", ""),
 			"who this controller is, for the Lease. Two controllers must not share one")
 
+		port = flag.Int("port", 8080,
+			"the port litekvd listens on. Must match the chart's service.port; they were allowed to\n"+
+				"disagree once, and a controller that cannot reach anything says only that nothing answered")
 		interval = flag.Duration("interval", time.Second,
 			"how often to look. Polling and not watching: three pods and a Lease is nothing, and it\n"+
 				"costs none of the resourceVersion expiry, bookmarks and relist a watch would")
@@ -147,6 +150,7 @@ func run() error {
 		identity:  *identity,
 		token:     storeToken,
 
+		port:           *port,
 		interval:       *interval,
 		grace:          *grace,
 		probeTimeout:   *timeout,

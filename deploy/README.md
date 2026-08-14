@@ -362,6 +362,39 @@ running a newer build against an older leader is the direction that has been
 tested. `helm upgrade` with a new `image.tag` does the leader in place, which is
 a short write outage rather than a failover.
 
+## Testing the controller
+
+The policy tests run against structs. The rest run against stand-ins — a
+Kubernetes API server that enforces `resourceVersion` the way etcd does, and
+litekvd nodes that answer `/v1/status` and raise their term when promoted — so
+everything the controller changes about a cluster goes through a real HTTP
+round trip and a wrong patch shape is visible rather than theoretical.
+
+Nineteen tests, and the one worth naming is **two controllers and only one
+acts**: a hundred rounds of both trying, with the stand-in refusing any write
+that does not carry the version it read. Both holding it at once means both
+promoting, which means two stores on two terms with two histories. Plus the race
+underneath it — both believing the Lease is free and both writing — where the
+loser must come away with "somebody else has it" and not with an error.
+
+Every guard was checked by breaking it and watching a test fail. Three of those
+checks found the *test* wanting rather than the code:
+
+- A mutation making a compare-and-swap conflict an error survived, because no
+  test ever reached that path: a controller that can see the Lease is held
+  stands by without writing. `TestARaceOnTheLeaseIsResolvedByTheAPIServer`
+  produces a genuine race.
+- A mutation promoting the wrong node survived twice. Every stand-in listens on
+  127.0.0.1 and the controller uses one port for all of them, so promoting the
+  corpse reached the same listener and the count was identical — and an empty
+  pod IP does not separate them either, since Go reads `http://:8080` as
+  localhost. The stand-in records the `Host` each promotion carried.
+- One mutation is still surviving and is written up in `kube.go`: swapping
+  strategic merge patch for a plain JSON merge patch on the Service selector.
+  Both are believed to merge a map key by key, so it may be no change at all.
+  Settling it needs one patch of each against a real API server; until somebody
+  does that, the line is not to be "simplified".
+
 ## What testing found
 
 Five bugs. Four were in this chart, one was in litekvd itself, and none of them

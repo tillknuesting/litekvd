@@ -32,6 +32,12 @@ type controller struct {
 	identity  string
 	token     string
 
+	// port is where litekvd listens, which the chart lets you change. It was
+	// hardcoded to 8080 here while values.yaml offered service.port, so any
+	// cluster on another port had a controller that could reach nothing and
+	// said only "no answer" about every node.
+	port int
+
 	interval       time.Duration
 	grace          time.Duration
 	probeTimeout   time.Duration
@@ -171,7 +177,7 @@ func (c *controller) ask(ctx context.Context, pods []pod) []node {
 
 func (c *controller) status(ctx context.Context, ip string) (*status, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		fmt.Sprintf("http://%s:8080/v1/status", ip), nil)
+		fmt.Sprintf("http://%s:%d/v1/status", ip, c.port), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -395,7 +401,7 @@ func (c *controller) sawSemiSync(nodes []node) bool {
 
 func (c *controller) promote(ctx context.Context, ip string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		fmt.Sprintf("http://%s:8080/v1/promote", ip), nil)
+		fmt.Sprintf("http://%s:%d/v1/promote", ip, c.port), nil)
 	if err != nil {
 		return err
 	}

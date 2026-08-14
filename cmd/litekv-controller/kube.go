@@ -206,6 +206,16 @@ func (k *kube) service(ctx context.Context, namespace, name string) (*service, e
 //
 // A merge patch of a nested object replaces only the keys named, which is what
 // is wanted: the selector keeps its app labels and changes which pod it means.
+//
+// Strategic merge patch rather than a plain JSON merge patch, and that choice
+// is UNVERIFIED. Both are believed to merge a map like spec.selector key by
+// key, so swapping one for the other may well be no change at all — a mutation
+// doing exactly that survives, and the stand-in in the tests merges either way
+// because it does not model the difference. What would settle it is one patch
+// of each against a real API server, checking whether the app labels survive;
+// until somebody does that, do not "simplify" this line, because the failure it
+// would cause is a Service whose selector lost its app labels and now selects
+// every pod in the namespace.
 func (k *kube) point(ctx context.Context, namespace, name, key, value string) error {
 	patch, err := json.Marshal(map[string]any{
 		"spec": map[string]any{"selector": map[string]string{key: value}},

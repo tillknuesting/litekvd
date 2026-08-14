@@ -53,6 +53,7 @@ spec:
           image: "{{ .Values.controller.image.repository | default (printf "%s-controller" .Values.image.repository) }}:{{ .Values.controller.image.tag | default .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           args:
+            - -port={{ .Values.service.port }}
             - -grace={{ .Values.controller.grace }}
             - -interval={{ .Values.controller.interval }}
             - -lease-duration={{ .Values.controller.leaseDuration }}
