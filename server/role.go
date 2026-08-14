@@ -1,9 +1,12 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"sync"
 	"time"
@@ -50,6 +53,16 @@ const (
 // 409 rather than a 403: the request was allowed, this is not the node to send
 // it to, and which node is has changed and may change again.
 var errFollowing = errors.New("this store is following a leader and does not take writes")
+
+// The three ways POST /v1/follow says no. Each is a 409: the request was
+// understood and the state is wrong for it, which is a different thing from the
+// request being malformed.
+var (
+	errFollowingAnother  = errors.New("this store is already following a different leader")
+	errAheadOfThatLeader = errors.New("this store is on a newer term than that leader; " +
+		"following it would fence it, so which of the two leads has to be decided elsewhere")
+	errNoLeaderThere = errors.New("that leader could not be asked what term it is on")
+)
 
 // errNotReached is a read from a store that has not got as far as the client
 // has already seen. Separate from litekv.ErrorStale so that the status can be a
@@ -103,6 +116,104 @@ func (s *Server) Follow(leader string, opts FollowerOptions) error {
 
 	s.role.leader, s.role.stop = leader, f.Close
 	return nil
+}
+
+// enlist answers POST /v1/follow?leader=<url>, which puts a running node behind
+// another one without restarting it.
+//
+// It exists because Promote was one-way. A node that led and was failed away
+// from could not be made a follower again — in Kubernetes its StatefulSet has
+// no -leader flag at all, so it comes back leading an old term for ever — and a
+// cluster therefore lost a replica at every failover and could not get it back.
+// Three failovers in and there is nothing left to promote.
+//
+// What it does not do is decide anything. The caller says which leader, exactly
+// as with Promote, and for the same reason: two nodes deciding who leads is the
+// failure this design exists to prevent.
+func (s *Server) enlist(w http.ResponseWriter, r *http.Request) {
+	leader := r.URL.Query().Get("leader")
+	if leader == "" {
+		s.fail(w, r, badRequest("leader is required: the base URL of the node to follow"))
+		return
+	}
+
+	at, err := url.Parse(leader)
+	if err != nil || at.Host == "" || (at.Scheme != "http" && at.Scheme != "https") {
+		s.fail(w, r, badRequest("leader must be a URL like http://host:8080"))
+		return
+	}
+
+	// Idempotent for the leader it is already following, because a controller
+	// that retries is a controller doing its job, and an error there would look
+	// like a fault every round.
+	if current, replica := s.following(); replica {
+		if current == leader {
+			s.status(w, r)
+			return
+		}
+		s.fail(w, r, errFollowingAnother)
+		return
+	}
+
+	// The check that makes this safe to expose. A follower carrying a newer
+	// term fences the leader it asks — that is how a replaced leader finds out
+	// — so enlisting a node whose term is above the target's would not join it
+	// to the cluster, it would take the cluster down. A node that far ahead has
+	// authority somebody has to reconcile by hand.
+	theirs, err := s.termOf(r.Context(), leader)
+	if err != nil {
+		s.fail(w, r, fmt.Errorf("%w: %w", errNoLeaderThere, err))
+		return
+	}
+	if mine := s.db.Term(); mine > theirs {
+		w.Header().Set(headerTerm, strconv.FormatUint(mine, 10))
+		s.fail(w, r, errAheadOfThatLeader)
+		return
+	}
+
+	if err := s.Follow(leader, s.opts.Follower); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+
+	s.log.Warn("now following", "leader", leader, "term was", s.db.Term())
+	s.status(w, r)
+}
+
+// termOf asks a node what term it is on.
+//
+// Asked of the node rather than taken from the caller, because the caller is
+// the thing being guarded against: a controller with a stale view would
+// otherwise talk this node into fencing a healthy leader.
+func (s *Server) termOf(ctx context.Context, leader string) (uint64, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, leader+"/v1/status", nil)
+	if err != nil {
+		return 0, err
+	}
+	if s.opts.Follower.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+s.opts.Follower.Token)
+	}
+
+	client := s.opts.Follower.Client
+	if client == nil {
+		client = http.DefaultClient
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("it answered %s", resp.Status)
+	}
+
+	var body statusBody
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return 0, err
+	}
+	return body.Term, nil
 }
 
 // stopFollowing ends the following, if there is any, and returns this node to

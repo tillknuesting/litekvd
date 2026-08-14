@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 )
 
@@ -260,6 +262,12 @@ func (c *controller) decide(ctx context.Context, nodes []node, pointedAt string)
 				"was silent for", time.Since(c.unreachableSince).Round(time.Second).String())
 			c.unreachableSince = time.Time{}
 		}
+		// Put any stranded ex-leader back to work before deciding what serves
+		// reads, so that a node enlisted this round is judged on what it has
+		// become rather than on what it was.
+		if err := c.enlist(ctx, nodes, leader); err != nil {
+			return err
+		}
 		return c.tidy(ctx, nodes, pointedAt)
 	}
 
@@ -417,6 +425,82 @@ func (c *controller) promote(ctx context.Context, ip string) error {
 
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("promote said %s", resp.Status)
+	}
+	return nil
+}
+
+// enlist puts a stranded ex-leader back to work as a replica.
+//
+// Promotion used to be one-way, and it cost a replica per failover. The old
+// leader's StatefulSet has no -leader flag — it was born leading — so it comes
+// back reporting role=leader on an old term, in neither Service, useful to
+// nobody. Three failovers in there is nothing left to promote and this
+// controller correctly refuses to do anything at all.
+//
+// POST /v1/follow is what makes that recoverable. The node takes a snapshot
+// from the current leader, drops its divergent records, and is a replica again
+// — and being a replica is also what finally stops it taking writes from
+// anything that reaches its pod IP, which no amount of moving Services could do.
+//
+// Only downwards: a node whose term is at or above the leader's is refused by
+// the route, because following is how a newer term fences an older one and
+// enlisting such a node would take the cluster down rather than heal it. That is
+// checked there as well as here — this is the caller the route is guarding
+// against.
+func (c *controller) enlist(ctx context.Context, nodes []node, leader *node) error {
+	if leader.status == nil || leader.status.Role != "leader" {
+		return nil
+	}
+
+	for i := range nodes {
+		n := &nodes[i]
+		switch {
+		case n.pod.Metadata.Name == leader.pod.Metadata.Name:
+		case n.status == nil || !n.pod.ready():
+		case n.status.Role != "leader":
+		case n.status.Term >= leader.status.Term:
+			// Not ours to reconcile: it has as much claim as the node the write
+			// Service names. Somebody has to look at that.
+			c.log.Error("a node claims to lead on a term at or above the leader's; leaving it alone",
+				"pod", n.pod.Metadata.Name, "its term", n.status.Term,
+				"the leader's", leader.status.Term)
+		default:
+			at := fmt.Sprintf("http://%s:%d", leader.pod.Status.PodIP, c.port)
+			if c.dryRun {
+				c.log.Warn("would enlist a stranded leader as a replica",
+					"pod", n.pod.Metadata.Name, "term", n.status.Term, "follow", at)
+				continue
+			}
+			c.log.Warn("enlisting a stranded leader as a replica",
+				"pod", n.pod.Metadata.Name, "term", n.status.Term, "follow", at)
+			if err := c.follow(ctx, n.pod.Status.PodIP, at); err != nil {
+				c.log.Error("could not enlist it", "pod", n.pod.Metadata.Name, "err", err)
+			}
+		}
+	}
+	return nil
+}
+
+// follow tells one node to follow another.
+func (c *controller) follow(ctx context.Context, ip, leader string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		fmt.Sprintf("http://%s:%d/v1/follow?leader=%s", ip, c.port, url.QueryEscape(leader)), nil)
+	if err != nil {
+		return err
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("follow said %s", resp.Status)
 	}
 	return nil
 }

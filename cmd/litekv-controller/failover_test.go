@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"testing"
 	"time"
 )
@@ -240,5 +241,73 @@ func TestASlowNodeIsNotAnAnswer(t *testing.T) {
 	}
 	if nodes[0].status != nil {
 		t.Error("a node slower than the probe timeout was counted as having answered")
+	}
+}
+
+// TestAStrandedLeaderIsPutBackToWork.
+//
+// The cluster used to lose a replica at every failover: the old leader's
+// StatefulSet has no -leader flag, so it came back reporting role=leader on an
+// old term and there was nothing to be done with it. Three failovers in, nothing
+// left to promote.
+func TestAStrandedLeaderIsPutBackToWork(t *testing.T) {
+	stranded, strandedAt := newFakeStore(t, status{Role: "leader", Term: 0, Seq: 3, WaitFor: 1})
+	strandedHost, port := splitHostPort(t, strandedAt)
+
+	pods := []pod{
+		podAt("lk-litekvd-replica-0", "10.0.0.9", nil), // the current leader
+		podAt("lk-litekvd-0", strandedHost, nil),       // the stranded ex-leader
+	}
+	_, srv, api := newFakeAPI(pods, "lk-litekvd-replica-0")
+	defer srv.Close()
+
+	c := against(t, api, "controller-one")
+	c.port = port
+
+	nodes := []node{
+		{pod: pods[0], status: &status{Role: "leader", Term: 1, Seq: 9, WaitFor: 1}},
+		{pod: pods[1], status: &status{Role: "leader", Term: 0, Seq: 3, WaitFor: 1}},
+	}
+
+	if err := c.decide(t.Context(), nodes, "lk-litekvd-replica-0"); err != nil {
+		t.Fatal(err)
+	}
+
+	told := stranded.enlistments()
+	if len(told) != 1 {
+		t.Fatalf("the stranded leader was told to follow %d times, want 1: %v", len(told), told)
+	}
+	if want := "http://10.0.0.9:" + strconv.Itoa(port); told[0] != want {
+		t.Errorf("it was pointed at %q, want %q", told[0], want)
+	}
+}
+
+// TestANodeOnTheLeadersTermOrAboveIsLeftAlone. Following is how a newer term
+// fences an older one, so enlisting a node with as much claim as the leader
+// would take the cluster down rather than heal it. That is somebody's decision,
+// not a controller's.
+func TestANodeOnTheLeadersTermOrAboveIsLeftAlone(t *testing.T) {
+	rival, rivalAt := newFakeStore(t, status{Role: "leader", Term: 2, Seq: 9, WaitFor: 1})
+	rivalHost, port := splitHostPort(t, rivalAt)
+
+	pods := []pod{
+		podAt("lk-litekvd-replica-0", "10.0.0.9", nil),
+		podAt("lk-litekvd-0", rivalHost, nil),
+	}
+	_, srv, api := newFakeAPI(pods, "lk-litekvd-replica-0")
+	defer srv.Close()
+
+	c := against(t, api, "controller-one")
+	c.port = port
+
+	nodes := []node{
+		{pod: pods[0], status: &status{Role: "leader", Term: 1, Seq: 9, WaitFor: 1}},
+		{pod: pods[1], status: &status{Role: "leader", Term: 2, Seq: 9, WaitFor: 1}},
+	}
+	if err := c.decide(t.Context(), nodes, "lk-litekvd-replica-0"); err != nil {
+		t.Fatal(err)
+	}
+	if told := rival.enlistments(); len(told) != 0 {
+		t.Errorf("a node on a term above the leader's was enlisted anyway: %v", told)
 	}
 }

@@ -298,6 +298,7 @@ costs you at most the record being written, and the lock goes with the process e
 | `POST`   | `/v1/batch`                | several records, all of them or none     | 204, 400, 413  |
 | `GET`    | `/v1/status`               | which of the two this node is            | 200            |
 | `POST`   | `/v1/promote`              | stop following and raise the term        | 200            |
+| `POST`   | `/v1/follow?leader=`       | follow that node, without a restart      | 200, 400, 409  |
 | `GET`    | `/v1/replica/stream?from=` | the records after a position, streamed   | 200, 400, 409  |
 | `POST`   | `/v1/replica/ack`          | a follower saying how far it has got     | 204, 400, 409  |
 | `GET`    | `/health`                  | whether this node can serve              | 200, 503       |

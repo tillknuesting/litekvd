@@ -98,6 +98,13 @@ func statusOf(err error) (int, string) {
 		errors.Is(err, litekv.ErrorKeyExpired):
 		return http.StatusNotFound, err.Error()
 
+	// The three ways POST /v1/follow says no. The request was understood and
+	// the state is wrong for it, which is a conflict rather than a bad request.
+	case errors.Is(err, errFollowingAnother),
+		errors.Is(err, errAheadOfThatLeader),
+		errors.Is(err, errNoLeaderThere):
+		return http.StatusConflict, err.Error()
+
 	// Not 403: the request was allowed, the store is no longer the one to send
 	// it to. A conflict is what that is.
 	case errors.Is(err, litekv.ErrorFenced):

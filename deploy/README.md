@@ -126,6 +126,28 @@ follower has reached a write. Positions themselves stay opaque cookies; these
 are separate integers added because something choosing between replicas has to
 answer "which got furthest" and cannot do it with two base64 strings.
 
+### Putting a stranded leader back to work
+
+A failover used to cost a replica permanently. The old leader's StatefulSet has
+no `-leader` flag — it was born leading — so it came back reporting
+`role=leader` on an old term, in neither Service and useful to nobody. Three
+failovers in, there is nothing left to promote and the controller correctly
+refuses to do anything at all.
+
+The controller now tells such a node to follow the current leader, over
+`POST /v1/follow`. It takes a snapshot, drops the records nobody else has, and
+is a replica again. Measured on a cluster: leader killed, `lk-litekvd-replica-0`
+promoted to term 1, the old leader brought back and enlisted within a round —
+`role=replica term=1` — and back in the read Service, three endpoints again.
+
+Being a replica is also what finally stops it taking writes from anything that
+reaches its pod IP directly, which no amount of moving Services could do.
+
+**Only downwards.** A node whose term is at or above the leader's is left alone
+and logged, because following is how a newer term fences an older one: enlisting
+it would take the cluster down rather than heal it. Two nodes with equal claim is
+a decision for a person, and the route refuses it as well as the controller.
+
 ### What it cannot do
 
 **It cannot stop the old leader taking writes from a client that reaches it

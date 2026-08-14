@@ -140,6 +140,13 @@ type Options struct {
 	// and no read-only credential: anything that can read can also write.
 	Token string
 
+	// Follower is what POST /v1/follow uses when this node is told to follow
+	// somebody: the token to authenticate with, how long to wait before
+	// reconnecting, and the client to dial with. The same options litekvd hands
+	// to Follow at startup, so a node enlisted at runtime behaves like one that
+	// started that way rather than on defaults nobody chose.
+	Follower FollowerOptions
+
 	// Logger is where a request that failed for a reason the client is not told
 	// gets written down, and where every request is written at Debug. Nil means
 	// slog.Default().
@@ -289,6 +296,7 @@ func New(db *litekv.DB, opts Options) *Server {
 	// Which of the two this node is, and the one call that changes it.
 	s.handle("GET /v1/status", s.status)
 	s.handle("POST /v1/promote", s.promote)
+	s.handle("POST /v1/follow", s.enlist)
 
 	// What somebody running this asks it. See ops.go for why /health is the one
 	// route the token does not cover.

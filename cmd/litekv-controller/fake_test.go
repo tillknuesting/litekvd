@@ -242,6 +242,9 @@ type fakeStore struct {
 	mu     sync.Mutex
 	status status
 
+	// Every leader it was told to follow, in order.
+	followed []string
+
 	// Every address a promotion was addressed to, in order.
 	//
 	// The count alone cannot say which node was promoted: every stand-in is on
@@ -262,6 +265,12 @@ func newFakeStore(t *testing.T, s status) (*fakeStore, string) {
 		defer f.mu.Unlock()
 
 		switch {
+		case strings.HasSuffix(r.URL.Path, "/v1/follow"):
+			f.followed = append(f.followed, r.URL.Query().Get("leader"))
+			f.status.Role = "replica"
+			f.status.Leader = r.URL.Query().Get("leader")
+			json.NewEncoder(w).Encode(f.status)
+
 		case strings.HasSuffix(r.URL.Path, "/v1/promote"):
 			f.promotedTo = append(f.promotedTo, r.Host)
 			f.status.Role = "leader"
@@ -296,6 +305,14 @@ func splitHostPort(t *testing.T, hostport string) (string, int) {
 		t.Fatal(err)
 	}
 	return host, n
+}
+
+// enlistments is what this node was told to follow, in order.
+func (f *fakeStore) enlistments() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return append([]string(nil), f.followed...)
 }
 
 func (f *fakeStore) promotions() int {

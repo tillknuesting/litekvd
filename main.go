@@ -200,7 +200,12 @@ func run() error {
 		WaitTimeout: *waitTimeout,
 		SpoolDir:    *spoolDir,
 		Heartbeat:   *heartbeat,
-		Logger:      log,
+
+		// What POST /v1/follow uses when something tells this node to follow a
+		// leader at runtime — the same options the startup -leader path below
+		// hands to Follow, so the two produce the same follower.
+		Follower: server.FollowerOptions{Token: token, Idle: *idle, Logger: log},
+		Logger:   log,
 	})
 	defer api.Close()
 

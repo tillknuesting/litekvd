@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -548,5 +549,86 @@ func TestStatusSaysHowFarEachNodeGot(t *testing.T) {
 	}
 	if moved := read(up.api).Seq; moved <= leader.Seq {
 		t.Errorf("the leader wrote a record and its seq did not move: %d", moved)
+	}
+}
+
+// TestANodeCanBeToldToFollowAtRuntime.
+//
+// Promote was one-way, and that cost a cluster a replica at every failover: a
+// node that led and was failed away from could not be made a follower again. In
+// Kubernetes its StatefulSet has no -leader flag at all, so it came back leading
+// an old term for ever and there was nothing to do with it but wipe it.
+func TestANodeCanBeToldToFollowAtRuntime(t *testing.T) {
+	up := serving(t, litekv.DBOptions{Sync: litekv.SyncNever})
+	if _, err := up.db.Promote(); err != nil { // term 1, as after a failover
+		t.Fatal(err)
+	}
+	for i := range 5 {
+		if err := up.db.Write(fmt.Appendf(nil, "real%d", i), []byte("v")); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// A stranded ex-leader: leading an old term, with a record nobody else has.
+	s, db := newServer(t, Options{Follower: FollowerOptions{Logger: quiet(),
+		MinBackoff: time.Millisecond, MaxBackoff: 20 * time.Millisecond}})
+	if err := db.Write([]byte("orphan"), []byte("only here")); err != nil {
+		t.Fatal(err)
+	}
+
+	wants(t, do(t, s, http.MethodPost, "/v1/follow?leader="+url.QueryEscape(up.srv.URL), nil),
+		http.StatusOK)
+	waitForPositions(t, db, up.db, "the ex-leader to converge on the new leader")
+
+	if _, replica := s.following(); !replica {
+		t.Fatal("it was told to follow and is still a leader")
+	}
+	if _, err := db.Read([]byte("orphan")); err == nil {
+		t.Error("its divergent record survived; it did not take a snapshot")
+	}
+	if _, err := db.Read([]byte("real0")); err != nil {
+		t.Errorf("it did not take the new leader's records: %v", err)
+	}
+
+	// Idempotent for the leader it already follows, because a controller that
+	// retries is one doing its job and an error there looks like a fault.
+	wants(t, do(t, s, http.MethodPost, "/v1/follow?leader="+url.QueryEscape(up.srv.URL), nil),
+		http.StatusOK)
+
+	// But not re-pointable while it is following: that is a decision, and this
+	// route does not make decisions.
+	wants(t, do(t, s, http.MethodPost, "/v1/follow?leader=http://elsewhere:8080", nil),
+		http.StatusConflict)
+}
+
+// TestItWillNotFollowALeaderItWouldFence.
+//
+// A follower carrying a newer term fences the leader it asks — that is how a
+// replaced leader finds out it has been replaced. So enlisting a node whose term
+// is above the target's would not join it to the cluster, it would take the
+// cluster down, and this is the check that stops a controller with a stale view
+// from doing exactly that.
+func TestItWillNotFollowALeaderItWouldFence(t *testing.T) {
+	behind := serving(t, litekv.DBOptions{Sync: litekv.SyncNever}) // term 0
+
+	ahead, db := newServer(t, Options{Follower: FollowerOptions{Logger: quiet()}})
+	for range 3 {
+		if _, err := db.Promote(); err != nil { // term 3, well past it
+			t.Fatal(err)
+		}
+	}
+
+	got := do(t, ahead, http.MethodPost, "/v1/follow?leader="+url.QueryEscape(behind.srv.URL), nil)
+	if got.StatusCode != http.StatusConflict {
+		t.Fatalf("a node on term %d agreed to follow one on term %d: %d",
+			db.Term(), behind.db.Term(), got.StatusCode)
+	}
+	if got.Header.Get(headerTerm) == "" {
+		t.Error("it refused without saying what term it is on")
+	}
+
+	// And the leader it refused to follow was not fenced by the asking.
+	if behind.db.Fenced() {
+		t.Error("merely being asked fenced the leader")
 	}
 }
