@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -217,9 +218,7 @@ func (f *fakeAPI) selector() map[string]string {
 	defer f.mu.Unlock()
 
 	out := map[string]string{}
-	for k, v := range f.svc.Spec.Selector {
-		out[k] = v
-	}
+	maps.Copy(out, f.svc.Spec.Selector)
 	return out
 }
 
@@ -230,9 +229,7 @@ func (f *fakeAPI) labelsOf(name string) map[string]string {
 	for _, p := range f.pods {
 		if p.Metadata.Name == name {
 			out := map[string]string{}
-			for k, v := range p.Metadata.Labels {
-				out[k] = v
-			}
+			maps.Copy(out, p.Metadata.Labels)
 			return out
 		}
 	}
