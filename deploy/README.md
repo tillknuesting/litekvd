@@ -157,8 +157,13 @@ reaches its pod IP directly, which no amount of moving Services could do.
 
 **Only downwards.** A node whose term is at or above the leader's is left alone
 and logged, because following is how a newer term fences an older one: enlisting
-it would take the cluster down rather than heal it. Two nodes with equal claim is
-a decision for a person, and the route refuses it as well as the controller.
+a node that is ahead would take the cluster down rather than heal it.
+
+The controller is the stricter of the two here, deliberately. `POST /v1/follow`
+refuses only a node that is strictly ahead of the target, since following a node
+on the same term cannot fence it. The controller stops at equal as well: two
+nodes claiming the same term is not a state it can reason its way out of, and
+picking one is a decision for a person who knows which of them took writes.
 
 ### What it cannot do
 
@@ -175,10 +180,18 @@ entirely unaware. A write sent straight to its pod IP was **accepted, readable o
 that node, and invisible to the real leader**. Those records are lost when its
 volume is eventually wiped.
 
-The thing that would close it is `DB.Demote` and a `/v1/demote` route — already
-on the engine's roadmap — which would let the controller stand a stale leader
-down rather than only starve it of traffic. Until then, a client that talks to
-pod IPs instead of the Service is outside what any of this can promise.
+What closes it, once the node is reachable again, is the enlistment above:
+being told to follow is what makes a store stop taking writes, and it is the
+only thing that does. So the exposure is a window rather than a hole — from the
+moment a stale leader starts answering to the controller's next round, which is
+a second by default.
+
+A window is not nothing. A node that a client can reach and the controller
+cannot stays open for as long as that lasts, and the writes it takes meanwhile
+are lost. Closing it from the inside would mean litekvd holding a lease of its
+own and refusing writes when it could not renew, which is a different piece of
+work; until somebody wants it, a client that talks to pod IPs instead of the
+Service is outside what any of this can promise.
 
 What the controller does do is keep it out of both Services — by name for
 writes, and by taking the `litekv.io/serving` label off it for reads, every
@@ -195,8 +208,6 @@ candidate choices it reports; a failover policy you have not watched is one you
 are guessing about.
 
 ## Development, with k3d
-
-### Development, with k3d
 
 A cluster, the image, and the chart:
 
@@ -426,10 +437,11 @@ so a store that cannot resolve cannot replicate.
 
 **The leader will not be evicted.** `podDisruptionBudget.leaderMaxUnavailable`
 is `0`, so `kubectl drain` on the leader's node refuses rather than proceeds.
-This will surprise somebody during routine maintenance, and it is meant to: with
-no automatic failover, evicting the leader is an outage until a person promotes
-a replica. Do the promotion first, then drain. Set it to `1` if you would rather
-have the drain and take the outage.
+This will surprise somebody during routine maintenance, and it is meant to:
+evicting the leader is a write outage either way — until a person promotes a
+replica with the controller off, or until the grace period runs out and the
+controller does it. Promote first and then drain, and there is no outage at all.
+Set it to `1` if you would rather have the drain and take the fifteen seconds.
 
 **Metrics.** Every pod serves `/metrics`; `serviceMonitor.enabled=true` wires up
 prometheus-operator against the headless Service so each pod is scraped

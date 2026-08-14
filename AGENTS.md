@@ -92,7 +92,7 @@ the only check that would notice.
 machine takes a different path through the store, and background merging stops
 being in the background.
 
-`tools/mutate` is a hundred and nine mutations across eight workers, each in its
+`tools/mutate` is a hundred and forty-one mutations across eight workers, each in its
 own copy of the repository, printing verdicts as they land. The machinery is
 `github.com/tillknuesting/litekv/mutate` — the engine module, which this one
 depends on anyway, so that neither repository holds a copy of a runner. What is
@@ -107,6 +107,39 @@ go run ./tools/mutate replica batch   # only those whose name matches
 is news, not noise: it means something the code promises has no test holding it
 there. Adding a mutation when you add a behaviour is four lines and part of
 writing the code.
+
+**The controller is in the sweep, and was not for a while.** Thirty-two of the
+mutations break `cmd/litekv-controller` and the two routes that came with it,
+and they were added late — the file had not been touched since before the
+controller existed, so the newest code here, and the only code that changes a
+cluster on its own, was the one part no sweep had ever been pointed at. Its
+tests were good; eight of them were not as good as they read:
+
+- The grace period was checked on the first round and never again, so a
+  controller that waited zero seconds passed. Two rounds in a row, microseconds
+  apart, is the test.
+- A fenced leader skipping the wait was a comment. Same shape, opposite
+  expectation.
+- `choose` excluding the node it is replacing was covered only by accident —
+  the old leader is normally silent, so it was skipped for having no status.
+- "Promote first, then move the traffic" was untestable: the promotion goes to
+  one stand-in and the Service patch to another, and neither could see the
+  order. They share an `events` log now.
+- The dry run covered failing over and not enlisting.
+- A node on the leader's *own* term being left alone — the case where `>=`
+  matters — had no test; only the term above it did.
+- A replica already following was enlisted again, invisibly, because every
+  stand-in shares an address. All three pods now answer on one of them, so
+  "it enlisted exactly one node" is an assertion and not a hope.
+
+**There is deliberately no mutation for the case in `enlist` that skips the
+leader itself.** It is subsumed by the term case below it — a node compared with
+itself is always at its own term — so removing it changes nothing any test can
+see. That was measured, not assumed: with all three pods on one stand-in, the
+leader still receives nothing. The line stays in the source anyway, because a
+rule that holds only as a side effect of a comparison further down is one that
+disappears in somebody's tidying. Same reasoning as the strategic-versus-merge
+patch in `kube.go`, which also has no entry and says so where it lives.
 
 The end-to-end run matters separately, because a handler test builds its own
 request and the interesting question is often whether a request can be built at
@@ -393,23 +426,31 @@ is shaped the way it is:
 
 ### What to build next
 
-**A lease, and a way down** is the gap worth naming clearly, because it is the
-only one where the current behaviour loses acknowledged writes. A replaced
-leader finds out it was replaced when something carrying a newer term asks it
-for records, and until then it goes on taking writes that are lost the moment it
-finds out. There is also no way down at all: the route table has
-`POST /v1/promote` and nothing opposite it, so a node that should hand over has
-to be killed.
+**A way down** was the gap worth naming clearly, because it was the only one
+where the behaviour lost acknowledged writes: a replaced leader finds out it was
+replaced when something carrying a newer term asks it for records, and until
+then it goes on taking writes that are lost the moment it finds out. The route
+table had `POST /v1/promote` and nothing opposite it, so a node that should hand
+over had to be killed.
 
-It is two commits in two repositories. The engine needs a `DB.Demote` — there is
-no way to lower a store back to following, and inventing one up here by writing
-a term into the state file would be exactly the reaching-past-the-API this
-repository exists to prevent. This side needs a `POST /v1/demote` and an
-optional lease loop, where a leader that cannot renew stops taking writes on its
-own. That bounds the window at the lease TTL less the clock skew rather than
-closing it, which is a much smaller number than "until a follower turns up" and
-is still a number. It is the external-lease arrangement the engine's `AGENTS.md`
-argues for under "Consensus, and why it is not on that list".
+**It is done, and it needed no engine change.** `POST /v1/follow` is the way
+down. The plan here was a `DB.Demote` and a `/v1/demote` beside it, on the
+grounds that a store has no way to lower itself back to following — and that
+turned out to be wrong about the code: `Server.Follow` already re-enlists a
+running leader, which drops the orphan record and takes the term from whoever it
+is now following. Measured before it was written: a leader on term 0 told to
+follow came back `role=replica term=1`. The route is in `server/role.go` and the
+controller calls it, so a stranded ex-leader is now a replica again within a
+round rather than a pod somebody has to delete.
+
+What is left of the gap is a window and not a hole. Between a stale leader
+becoming reachable and the controller's next round it will still take a write
+from a client that dials its pod IP, and a node partitioned from the controller
+but not from a client stays that way for as long as the partition lasts. An
+optional lease loop in litekvd itself — a leader that cannot renew stops taking
+writes on its own — is what would bound that from the inside, at the lease TTL
+less the clock skew. It is the external-lease arrangement the engine's
+`AGENTS.md` argues for under "Consensus, and why it is not on that list".
 
 **Ranges that stream and page** is an engine change first: a k-way merge over
 the per-log sorted keys instead of a gather, plus a cursor a client can resume

@@ -176,9 +176,17 @@ helm install lk oci://ghcr.io/tillknuesting/charts/litekvd -n litekv --create-na
 ```
 
 The container image is a `scratch` base with four files in it and comes to
-6.6 MB. [`deploy/README.md`](deploy/README.md) has the k3d development loop and
-the failover runbook — read that before you need it, because there is no
-automatic failover and promotion is deliberately a decision somebody makes.
+6.6 MB.
+
+The chart also carries a controller that fails the cluster over on its own,
+holding a Kubernetes Lease so that only one thing ever decides who leads. It is
+off by default — automatic failover is a choice about somebody's data, not a
+default — and it refuses to act at all on a cluster that is replicating
+asynchronously. Turn it on with `--set controller.enabled=true`.
+
+[`deploy/README.md`](deploy/README.md) has the k3d development loop, what the
+controller will and will not do, and the manual failover runbook for when it is
+off. Read it before you need it.
 
 ### Running it as a service
 
@@ -543,6 +551,21 @@ and it is not here. Raising the term in two places at once puts two stores on th
 gives the guarantee away, so whatever decides has to be the only thing deciding — an external
 lease, or a person. See [Limitations](#limitations).
 
+**The way back down is `POST /v1/follow?leader=`**, and it takes no restart. A node that was
+promoted, or one that came back from the dead still believing it leads, is told to follow the
+current leader: it takes a snapshot, drops the records nobody else has, and is a replica again.
+
+```bash
+curl -X POST 'http://127.0.0.1:8081/v1/follow?leader=http%3A%2F%2F127.0.0.1%3A8080'
+# {"role":"replica","term":1,"leader":"http://127.0.0.1:8080", ...}
+```
+
+It refuses, with a 409, to follow a node whose term is below its own. Following is how a newer
+term fences an older one, so pointing a node at a leader with less claim than itself would not
+join it to the cluster — it would stop the cluster. Two nodes with equal claim is a decision for
+a person. It is also idempotent for the leader it is already following, because anything
+retrying is doing its job.
+
 ### Reads that are not stale
 
 Every write answers with `Litekv-Position`, an opaque cookie for where the store had got to.
@@ -833,12 +856,15 @@ where what is being amortized is one wait for the disk shared out among everybod
 
 Read these before choosing this, not after.
 
-- **There is no failover.** Which node is the leader is your decision and nobody else's.
+- **litekvd elects nothing.** Which node is the leader is a decision made outside it.
   `POST /v1/promote` writes the decision down, it does not make it, and raising the term in two
-  places at once puts two nodes on the same term and gives the guarantee away.
-- **A fenced leader has to be told, and only replication tells it.** A leader that has been
-  replaced finds out when something carrying a newer term asks it for records. Until then it goes
-  on taking writes, and those writes are lost when it finds out.
+  places at once puts two nodes on the same term and gives the guarantee away. On Kubernetes the
+  chart's controller can make that decision for you, holding a Lease so that only one thing ever
+  does — see [`deploy/README.md`](deploy/README.md). Anywhere else the decision is yours.
+- **A replaced leader has to be told, and nothing tells it by itself.** It finds out when a
+  follower carrying a newer term asks it for records, or when something sends it
+  `POST /v1/follow`. Until one of those happens it goes on taking writes, and those writes are
+  lost when it does.
 - **A semi-synchronous write cannot be taken back.** A wait that runs out answers 202 and the
   record stays. A client that retries on 202 writes it twice.
 - **No transactions.** A batch is atomic and durable and that is the whole of it: no reads in it,
