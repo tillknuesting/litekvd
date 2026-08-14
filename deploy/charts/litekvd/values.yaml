@@ -7,6 +7,8 @@
 # promotion runbook in deploy/README.md.
 
 image:
+  # Published by the release workflow on a version tag, for linux/amd64 and
+  # linux/arm64, with an SBOM and a cosign signature over the digest.
   repository: ghcr.io/tillknuesting/litekvd
   # Empty takes the chart's appVersion. Pin a digest in production; a tag can
   # be moved and a digest cannot.
@@ -188,7 +190,10 @@ controller:
   verbose: false
 
   image:
-    # Empty takes the store's repository with -controller on the end.
+    # Empty takes the store's repository with -controller on the end, which is
+    # what the release workflow publishes: the controller is a separate image so
+    # that the store's stays at 6.6 MB rather than carrying a binary it never
+    # runs.
     repository: ""
     tag: ""
 

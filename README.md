@@ -172,7 +172,7 @@ node, with persistent volumes, a bearer token, PodDisruptionBudgets and an
 optional ServiceMonitor:
 
 ```bash
-helm install lk deploy/charts/litekvd -n litekv --create-namespace
+helm install lk oci://ghcr.io/tillknuesting/charts/litekvd -n litekv --create-namespace
 ```
 
 The container image is a `scratch` base with four files in it and comes to

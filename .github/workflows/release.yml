@@ -1,0 +1,117 @@
+name: Release
+
+# On a version tag only. Nothing here runs on a push to main: publishing is a
+# decision, and a pipeline that publishes whenever somebody merges is one that
+# publishes things nobody decided to publish.
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # To push to ghcr.io as the repository itself, with the token Actions
+      # already provides. No secret to create and none to rotate.
+      packages: write
+      # For cosign's keyless signing: the signature is bound to this workflow's
+      # OIDC identity rather than to a private key somebody has to keep, which
+      # is the whole reason to prefer it.
+      id-token: write
+
+    strategy:
+      matrix:
+        include:
+          # The store. Its Dockerfile stage is the last one, so no target.
+          - image: litekvd
+            target: ""
+          # The controller, which is a separate stage so that the store's image
+          # stays at 6.6 MB rather than carrying a binary it never runs.
+          - image: litekvd-controller
+            target: controller
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # QEMU so that the amd64 runner can produce the arm64 half. The binaries
+      # are cross-compiled by Go rather than emulated — GOARCH is passed into
+      # the build stage — so this is only here for the base image handling.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: ${{ matrix.target }}
+          # Both, because a chart that only runs on the architecture its author
+          # happened to own is a chart most clusters cannot use.
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # An SBOM and provenance travel with the image as attestations, so
+          # anything asking "what is in this and where did it come from" has an
+          # answer that did not have to be produced later from memory.
+          sbom: true
+          provenance: mode=max
+
+      - uses: sigstore/cosign-installer@v3
+
+      # Signed by digest and not by tag. A tag can be moved to point at
+      # something else; a digest is the thing itself, so a signature over a tag
+      # says less than it appears to.
+      - name: Sign
+        run: |
+          cosign sign --yes \
+            ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ matrix.image }}@${{ steps.build.outputs.digest }}
+
+  chart:
+    runs-on: ubuntu-latest
+    needs: images
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # The chart's version and appVersion are taken from the tag rather than
+      # read out of Chart.yaml, so that the chart and the images it installs
+      # cannot drift apart — the commonest way a published chart ends up
+      # pulling an image from six months ago.
+      - name: Package and push
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          helm package deploy/charts/litekvd \
+            --version "$version" --app-version "$version"
+          helm push "litekvd-${version}.tgz" \
+            "oci://${REGISTRY}/${{ github.repository_owner }}/charts"

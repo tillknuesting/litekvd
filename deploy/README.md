@@ -3,8 +3,20 @@
 A Helm chart for one leader and two replicas, on three nodes.
 
 ```bash
-helm install lk deploy/charts/litekvd -n litekv --create-namespace
+helm install lk oci://ghcr.io/tillknuesting/charts/litekvd \
+  --version 1.0.0 -n litekv --create-namespace
 ```
+
+The chart and both images are published on a version tag, for linux/amd64 and
+linux/arm64, each with an SBOM and a cosign signature over its digest:
+
+```bash
+cosign verify ghcr.io/tillknuesting/litekvd:1.0.0 \
+  --certificate-identity-regexp 'https://github.com/tillknuesting/litekvd/.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+```
+
+Or install from a checkout, which is what the development loop below does.
 
 Everything here was run against a four-node [k3d](https://k3d.io) cluster before
 it was written down, including the failover drill — which is how three bugs in
