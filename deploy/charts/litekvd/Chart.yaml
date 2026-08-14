@@ -8,8 +8,8 @@ type: application
 # here is what `helm install ./deploy/charts/litekvd` uses, which is the
 # development path — keep it on the last release rather than ahead of it, since
 # image.tag is empty by default and takes appVersion.
-version: 1.0.1
-appVersion: "1.0.1"
+version: 1.0.2
+appVersion: "1.0.2"
 
 home: https://github.com/tillknuesting/litekvd
 sources:
