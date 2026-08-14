@@ -465,7 +465,20 @@ func (c *controller) enlist(ctx context.Context, nodes []node, leader *node) err
 				"pod", n.pod.Metadata.Name, "its term", n.status.Term,
 				"the leader's", leader.status.Term)
 		default:
-			at := fmt.Sprintf("http://%s:%d", leader.pod.Status.PodIP, c.port)
+			// The write Service, not the leader's pod IP.
+			//
+			// A pod IP pins the node to whichever pod leads today, and the next
+			// failover strands it again: it goes on asking a node that has since
+			// become a replica, which now refuses to serve replication — so it
+			// sits following nobody, on an old term, looking healthy. Two
+			// consecutive failovers on a cluster produced exactly that, with a
+			// node left on term 1 while the leader was on term 3.
+			//
+			// The Service is what the chart gives its own replicas, and it is
+			// what makes an enlisted node behave like one: when the selector
+			// moves, every follower moves with it and nothing has to be told
+			// again.
+			at := fmt.Sprintf("http://%s-leader:%d", c.release, c.port)
 			if c.dryRun {
 				c.log.Warn("would enlist a stranded leader as a replica",
 					"pod", n.pod.Metadata.Name, "term", n.status.Term, "follow", at)

@@ -277,7 +277,13 @@ func TestAStrandedLeaderIsPutBackToWork(t *testing.T) {
 	if len(told) != 1 {
 		t.Fatalf("the stranded leader was told to follow %d times, want 1: %v", len(told), told)
 	}
-	if want := "http://10.0.0.9:" + strconv.Itoa(port); told[0] != want {
+
+	// The Service, not the leader's pod IP. A pod IP pins it to whoever leads
+	// today and strands it again at the next failover — which a cluster
+	// demonstrated, leaving a node on term 1 while the leader was on term 3,
+	// following a pod that had itself become a replica and was refusing to
+	// serve it.
+	if want := "http://lk-litekvd-leader:" + strconv.Itoa(port); told[0] != want {
 		t.Errorf("it was pointed at %q, want %q", told[0], want)
 	}
 }
