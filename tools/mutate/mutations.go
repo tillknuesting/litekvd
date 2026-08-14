@@ -614,8 +614,8 @@ var mutations = []mutate.Mutation{
 	{
 		File: "server/role.go",
 		Name: "a fenced store does not say so in its status",
-		Old:  "\t\tFenced: s.db.Fenced(), Segments: s.db.Segments(), Keys: s.db.Len()}",
-		New:  "\t\tSegments: s.db.Segments(), Keys: s.db.Len()}",
+		Old:  "\t\tFenced: s.db.Fenced(), Segments: s.db.Segments(), Keys: s.db.Len(),",
+		New:  "\t\tSegments: s.db.Segments(), Keys: s.db.Len(),",
 	},
 	{
 		File: "server/ops.go",
@@ -664,5 +664,224 @@ var mutations = []mutate.Mutation{
 		Name: "a heartbeat may carry a payload",
 		Old:  "\t\t\tif length != 0 {\n\t\t\t\treturn fmt.Errorf(\"a heartbeat carrying %d bytes\", length)\n\t\t\t}",
 		New:  "\t\t\t_ = length",
+	},
+
+	// The refusal that stops a store destroying itself. It is one `if` and it
+	// is the only bug found here that lost data, so it gets a mutation of its
+	// own rather than living under the write refusal in role.go, which is a
+	// different rule about a different route.
+	{
+		File: "server/replica.go",
+		Name: "a node that is following serves replication anyway",
+		Old:  "\tif leader, replica := s.following(); replica {\n\t\tw.Header().Set(headerLeader, leader)\n\t\ts.fail(w, r, errFollowing)\n\t\treturn\n\t}",
+		New:  "\tif leader, replica := s.following(); replica && false {\n\t\tw.Header().Set(headerLeader, leader)\n\t\ts.fail(w, r, errFollowing)\n\t\treturn\n\t}",
+	},
+
+	// POST /v1/follow, which is the way down that promotion had no opposite of.
+	{
+		File: "server/role.go",
+		Name: "enlisting against the leader it already follows is an error",
+		Old:  "\t\tif current == leader {",
+		New:  "\t\tif current != leader {",
+	},
+	{
+		File: "server/role.go",
+		Name: "a node ahead of that leader enlists against it anyway",
+		Old:  "\tif mine := s.db.Term(); mine > theirs {",
+		New:  "\tif mine := s.db.Term(); mine > theirs && false {",
+	},
+
+	// The controller.
+	//
+	// It is the only thing here that changes a cluster without being asked, and
+	// a promotion made for the wrong reason is quiet and permanent — so the
+	// decisions get mutations before the plumbing does. Every entry below is a
+	// sentence from deploy/README.md turned back into code: the candidate is
+	// the replica that got furthest, the grace period is a run of failures and
+	// not an aggregate, a node at or above the leader's term is left alone.
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "term is ignored when ranking candidates",
+		Old:  "\tif a.Term != b.Term {\n\t\treturn a.Term > b.Term\n\t}\n\treturn a.AppliedSeq > b.AppliedSeq",
+		New:  "\treturn a.AppliedSeq > b.AppliedSeq",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "the leader being replaced is a candidate to replace itself",
+		Old:  "\t\tif n.status == nil || n.pod.Metadata.Name == old.pod.Metadata.Name {",
+		New:  "\t\tif n.status == nil {",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "a node that is unready or fenced is a candidate",
+		Old:  "\t\tif !n.pod.ready() || n.status.Fenced {\n\t\t\tcontinue\n\t\t}",
+		New:  "\t\tif false {\n\t\t\tcontinue\n\t\t}",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "the candidate is the least far along rather than the furthest",
+		Old:  "\t\tif best == nil || further(n.status, best.status) {",
+		New:  "\t\tif best == nil || !further(n.status, best.status) {",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "it promotes although nothing answered",
+		Old:  "\tif best == nil {\n\t\treturn nil, \"no replica answered\"\n\t}",
+		New:  "\tif false {\n\t\treturn nil, \"no replica answered\"\n\t}",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "an asynchronous cluster is failed over without being told to",
+		Old:  "\tif c.requireWaitFor && !c.sawSemiSync(nodes) {",
+		New:  "\tif false && !c.sawSemiSync(nodes) {",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "a round that outlived its lease acts on it anyway",
+		Old:  "\tif since := time.Since(c.held); since > c.leaseDuration/2 {",
+		New:  "\tif since := time.Since(c.held); since > c.leaseDuration*1000 {",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "a write target that is following is left following",
+		Old:  "\tif leader.status != nil && leader.status.Role != \"leader\" {",
+		New:  "\tif false {",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "the first silent round is a failover",
+		Old:  "\tif c.unreachableSince.IsZero() {\n\t\tc.unreachableSince = time.Now()",
+		New:  "\tif false {\n\t\tc.unreachableSince = time.Now()",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "the grace period is not waited out",
+		Old:  "\tif waited := time.Since(c.unreachableSince); waited < c.grace && why != \"fenced\" {",
+		New:  "\tif waited := time.Since(c.unreachableSince); waited < 0 && why != \"fenced\" {",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "a fenced leader is given the grace period anyway",
+		Old:  " && why != \"fenced\" {",
+		New:  " {",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "a leader that answers again keeps the silence against it",
+		Old:  "\t\t\t\t\"was silent for\", time.Since(c.unreachableSince).Round(time.Second).String())\n\t\t\tc.unreachableSince = time.Time{}",
+		New:  "\t\t\t\t\"was silent for\", time.Since(c.unreachableSince).Round(time.Second).String())",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "the traffic moves before the promotion",
+		Old:  "\tif err := c.promote(ctx, best.pod.Status.PodIP); err != nil {\n\t\treturn fmt.Errorf(\"promoting %s: %w\", best.pod.Metadata.Name, err)\n\t}\n\tif err := c.api.point(ctx, c.namespace, c.release+\"-leader\",\n\t\tpodNameLabel, best.pod.Metadata.Name); err != nil {\n\t\treturn fmt.Errorf(\"pointing the write Service at %s: %w\", best.pod.Metadata.Name, err)\n\t}",
+		New:  "\tif err := c.api.point(ctx, c.namespace, c.release+\"-leader\",\n\t\tpodNameLabel, best.pod.Metadata.Name); err != nil {\n\t\treturn fmt.Errorf(\"pointing the write Service at %s: %w\", best.pod.Metadata.Name, err)\n\t}\n\tif err := c.promote(ctx, best.pod.Status.PodIP); err != nil {\n\t\treturn fmt.Errorf(\"promoting %s: %w\", best.pod.Metadata.Name, err)\n\t}",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "the replaced leader is left in the read Service",
+		Old:  "\tif err := c.api.label(ctx, c.namespace, old.pod.Metadata.Name, servingLabel, \"\"); err != nil {",
+		New:  "\tif err := error(nil); err != nil {",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "a dry run fails over for real",
+		Old:  "\tif c.dryRun {\n\t\treturn nil\n\t}",
+		New:  "\tif false {\n\t\treturn nil\n\t}",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "a dry run enlists a stranded leader for real",
+		Old:  "\t\t\tif c.dryRun {\n\t\t\t\tc.log.Warn(\"would enlist a stranded leader as a replica\",",
+		New:  "\t\t\tif false {\n\t\t\t\tc.log.Warn(\"would enlist a stranded leader as a replica\",",
+	},
+	// There is deliberately no entry for the case that skips the leader itself.
+	// It is subsumed by the term case below it — a node compared with itself is
+	// always at its own term — so breaking it changes no behaviour and only
+	// makes the controller log an error about the leader every round. Measured
+	// rather than reasoned: with that case removed, the stranded-leader test
+	// puts all three pods on one stand-in, and the leader still receives
+	// nothing. It stays in the source because relying on that coincidence is
+	// how the guard disappears in somebody's tidying, and it is one line.
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "a node on the leader's own term is enlisted against it",
+		Old:  "\t\tcase n.status.Term >= leader.status.Term:",
+		New:  "\t\tcase n.status.Term > leader.status.Term:",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "a node that is already a replica is enlisted again",
+		Old:  "\t\tcase n.status.Role != \"leader\":",
+		New:  "\t\tcase false:",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "a stranded leader is enlisted against a pod IP",
+		Old:  "\t\t\tat := fmt.Sprintf(\"http://%s-leader:%d\", c.release, c.port)",
+		New:  "\t\t\tat := fmt.Sprintf(\"http://%s:%d\", leader.pod.Status.PodIP, c.port)",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "a settled cluster is patched every round",
+		Old:  "\t\tif should == serving {",
+		New:  "\t\tif should == serving && false {",
+	},
+	{
+		File: "cmd/litekv-controller/controller.go",
+		Name: "a node that is following is taken out of the read Service",
+		Old:  "\t\tshould := n.pod.Metadata.Name == leaderName || n.status.Role == \"replica\"",
+		New:  "\t\tshould := n.pod.Metadata.Name == leaderName",
+	},
+
+	// The Lease, which is the whole of the mutual exclusion. Everything above
+	// is about deciding well; these are about not deciding twice.
+	{
+		File: "cmd/litekv-controller/lease.go",
+		Name: "the lease's times are written without the six decimal places",
+		Old:  "const microTime = \"2006-01-02T15:04:05.000000Z07:00\"",
+		New:  "const microTime = time.RFC3339",
+	},
+	{
+		File: "cmd/litekv-controller/lease.go",
+		Name: "an API server it cannot reach means it holds the lease",
+		Old:  "\t\treturn false, err\n\t}\n\n\tmine := current.Spec.HolderIdentity == c.identity",
+		New:  "\t\treturn true, nil\n\t}\n\n\tmine := current.Spec.HolderIdentity == c.identity",
+	},
+	{
+		File: "cmd/litekv-controller/lease.go",
+		Name: "it writes to a lease it can see somebody else holds",
+		Old:  "\tif !mine && !c.stale(current, now) {\n\t\treturn false, nil\n\t}",
+		New:  "\tif false {\n\t\treturn false, nil\n\t}",
+	},
+	{
+		File: "cmd/litekv-controller/lease.go",
+		Name: "losing the compare-and-swap is an error rather than the mechanism",
+		Old:  "\t\tif errors.Is(err, errConflict) {\n\t\t\t// Somebody wrote it between the read and the write. They hold it;\n\t\t\t// this round does nothing. That is the compare-and-swap doing its\n\t\t\t// job rather than a failure.\n\t\t\treturn false, nil\n\t\t}",
+		New:  "\t\tif false {\n\t\t\treturn false, nil\n\t\t}",
+	},
+	{
+		File: "cmd/litekv-controller/lease.go",
+		Name: "a lease is stale the first time it is seen",
+		Old:  "\t\tc.seenAt = now\n\t\treturn false\n\t}",
+		New:  "\t\tc.seenAt = now\n\t\treturn true\n\t}",
+	},
+	{
+		File: "cmd/litekv-controller/lease.go",
+		Name: "a lease being renewed is stale regardless",
+		Old:  "\treturn now.Sub(c.seenAt) > time.Duration(current.Spec.LeaseDurationSeconds)*time.Second",
+		New:  "\treturn true",
+	},
+	{
+		File: "cmd/litekv-controller/kube.go",
+		Name: "the lease is written without a resourceVersion",
+		Old:  "\t\t\t\"resourceVersion\": l.Metadata.ResourceVersion,\n",
+		New:  "",
+	},
+	{
+		File: "cmd/litekv-controller/kube.go",
+		Name: "removing a label sets it to the string null instead",
+		Old:  "\t\tlabels = map[string]any{key: nil}",
+		New:  "\t\tlabels = map[string]any{key: \"null\"}",
 	},
 }

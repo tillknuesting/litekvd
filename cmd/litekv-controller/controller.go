@@ -455,6 +455,14 @@ func (c *controller) enlist(ctx context.Context, nodes []node, leader *node) err
 	for i := range nodes {
 		n := &nodes[i]
 		switch {
+		// The leader itself, which must never be told to follow anything —
+		// least of all itself, which is the self-follow that empties a store.
+		//
+		// This case is redundant and stays anyway: a node compared with itself
+		// is always at its own term, so the term case below would refuse it in
+		// any event. Removing this one changes nothing a test can see, which a
+		// mutation sweep confirmed rather than assumed. Leaving the rule to be
+		// an accident of a comparison further down is how it stops being true.
 		case n.pod.Metadata.Name == leader.pod.Metadata.Name:
 		case n.status == nil || !n.pod.ready():
 		case n.status.Role != "leader":

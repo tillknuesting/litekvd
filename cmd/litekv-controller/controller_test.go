@@ -146,6 +146,39 @@ func TestItWillNotPromoteWhatItCannotSee(t *testing.T) {
 	}
 }
 
+// TestTheNodeBeingReplacedIsNotItsOwnReplacement.
+//
+// choose excludes the node it is replacing by name, and every other clause
+// hides that: the old leader is normally silent, so it is skipped for having no
+// status, and a fenced one is skipped for being fenced. Take the name check
+// away and both of those still cover the paths decide takes today — which is
+// why a mutation removing it survived a sweep.
+//
+// So this pins the contract of the function rather than a path through the
+// program: choose is asked for a replacement for old, and old is never one,
+// whatever state it is in. That is the thing the next change to decide will
+// lean on without checking.
+func TestTheNodeBeingReplacedIsNotItsOwnReplacement(t *testing.T) {
+	// Answering, unfenced, and further along than anything else — which the
+	// node being replaced generally is, since nothing else has as much of the
+	// history. Rank it and it wins.
+	nodes := []node{
+		{pod: ready("lk-0"), status: &status{Role: "leader", Term: 1, AppliedSeq: 99, WaitFor: 1}},
+		{pod: ready("lk-replica-0"), status: at(1, 5)},
+	}
+
+	c := &controller{log: quiet(), requireWaitFor: true, leaseDuration: 15e9}
+	c.held = now()
+
+	best, refused := c.choose(nodes, &nodes[0])
+	if best == nil {
+		t.Fatalf("it refused to promote the only replica there is: %s", refused)
+	}
+	if best.pod.Metadata.Name != "lk-replica-0" {
+		t.Errorf("it picked %s, which is the node it was asked to replace", best.pod.Metadata.Name)
+	}
+}
+
 // TestAStaleLeaseStopsItActing. A round polls every pod, and each of those may
 // wait out the probe timeout. A round that took longer than half the lease has
 // no business still believing it holds it.

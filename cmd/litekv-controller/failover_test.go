@@ -30,8 +30,11 @@ func podAt(name, ip string, labels map[string]string) pod {
 // the replica that got furthest, and the old leader comes out of the read path
 // on the way.
 func TestAFailoverPromotesAndMovesTheTraffic(t *testing.T) {
-	behind, behindAt := newFakeStore(t, status{Role: "replica", Term: 1, AppliedSeq: 4, WaitFor: 1})
-	ahead, aheadAt := newFakeStore(t, status{Role: "replica", Term: 1, AppliedSeq: 9, WaitFor: 1})
+	ev := &events{}
+	behind, behindAt := newFakeStoreIn(t,
+		status{Role: "replica", Term: 1, AppliedSeq: 4, WaitFor: 1}, "lk-litekvd-replica-0", ev)
+	ahead, aheadAt := newFakeStoreIn(t,
+		status{Role: "replica", Term: 1, AppliedSeq: 9, WaitFor: 1}, "lk-litekvd-replica-1", ev)
 
 	host, port := splitHostPort(t, aheadAt)
 	behindHost, _ := splitHostPort(t, behindAt)
@@ -49,6 +52,7 @@ func TestAFailoverPromotesAndMovesTheTraffic(t *testing.T) {
 	}
 	f, srv, api := newFakeAPI(pods, "lk-litekvd-0")
 	defer srv.Close()
+	f.events = ev
 
 	c := against(t, api, "controller-one")
 	c.port = port // both stand-ins are on the same host, different ports
@@ -93,6 +97,16 @@ func TestAFailoverPromotesAndMovesTheTraffic(t *testing.T) {
 	if _, serving := f.labelsOf("lk-litekvd-0")[servingLabel]; serving {
 		t.Error("the old leader is still in the read Service")
 	}
+
+	// The order the doc comment above claims, now that the stand-ins share a
+	// log and it can be asserted rather than described. It could not be before,
+	// and a mutation swapping the two calls survived a sweep because of it:
+	// pointing the Service first sends every write to a node that is still a
+	// replica, and it answers all of them 409 until the promotion lands.
+	if !ev.before("lk-litekvd-replica-1 was promoted",
+		"the write Service points at lk-litekvd-replica-1") {
+		t.Errorf("promotion and traffic went in the wrong order, or not at all: %s", ev)
+	}
 }
 
 // TestTheWriteTargetIsNotPromotedTwice. decide re-promotes a write target that
@@ -129,6 +143,89 @@ func TestTheWriteTargetIsNotPromotedTwice(t *testing.T) {
 	}
 	if store.promotions() != 1 {
 		t.Errorf("it promoted a healthy leader again: %d promotions", store.promotions())
+	}
+}
+
+// waiting builds a cluster of one silent leader and one replica that can be
+// promoted, with the controller holding a fresh lease.
+func waiting(t *testing.T, leader *status) (*fakeStore, *controller, []node) {
+	t.Helper()
+
+	replica, at := newFakeStore(t, status{Role: "replica", Term: 1, AppliedSeq: 9, WaitFor: 1})
+	host, port := splitHostPort(t, at)
+
+	pods := []pod{
+		podAt("lk-litekvd-0", "10.0.0.9", nil),
+		podAt("lk-litekvd-replica-0", host, nil),
+	}
+	_, srv, api := newFakeAPI(pods, "lk-litekvd-0")
+	t.Cleanup(srv.Close)
+
+	c := against(t, api, "controller-one")
+	c.port, c.held, c.requireWaitFor = port, now(), true
+
+	return replica, c, []node{
+		{pod: pods[0], status: leader},
+		{pod: pods[1], status: &status{Role: "replica", Term: 1, AppliedSeq: 9, WaitFor: 1}},
+	}
+}
+
+// TestTheGracePeriodIsWaitedOutAndThenActedOn.
+//
+// TestASilentLeaderIsNotImmediatelyGone covers the first silent round, which
+// only starts the clock. This is the round after it — inside the period, with a
+// promotable replica sitting right there — and then the round after the period
+// has run out. Checking the period once and never again is a hair trigger with
+// a reassuring comment above it, and it is what a surviving mutation said this
+// suite could not tell apart.
+func TestTheGracePeriodIsWaitedOutAndThenActedOn(t *testing.T) {
+	replica, c, nodes := waiting(t, nil) // nil: the leader says nothing at all
+
+	// Two rounds, microseconds apart, against a fifteen-second grace period.
+	for i := range 2 {
+		if err := c.decide(t.Context(), nodes, "lk-litekvd-0"); err != nil {
+			t.Fatalf("round %d: %v", i, err)
+		}
+	}
+	if got := replica.promotions(); got != 0 {
+		t.Fatalf("it failed over inside the grace period: %d promotions", got)
+	}
+
+	// And when the silence has outlasted the period, it acts. Without this
+	// half, a controller that never failed over at all would pass the above.
+	c.unreachableSince = longAgo()
+	if err := c.decide(t.Context(), nodes, "lk-litekvd-0"); err != nil {
+		t.Fatal(err)
+	}
+	if got := replica.promotions(); got != 1 {
+		t.Errorf("the grace period ran out and it promoted %d times, want 1", got)
+	}
+}
+
+// TestAFencedLeaderIsNotMadeToWait.
+//
+// The grace period is there for a leader that might come back: a rolling
+// restart, a long GC, a node rebooting. A fenced one is not that. Something
+// carrying a newer term has already told it that it is finished, so there is
+// nothing to wait for and the wait is an outage nobody chose.
+func TestAFencedLeaderIsNotMadeToWait(t *testing.T) {
+	replica, c, nodes := waiting(t, &status{Role: "leader", Term: 1, Fenced: true, WaitFor: 1})
+
+	// The first round starts the clock whatever the reason, so the second round
+	// is where the two policies differ — and it is still well inside the
+	// fifteen seconds a silent leader would get.
+	if err := c.decide(t.Context(), nodes, "lk-litekvd-0"); err != nil {
+		t.Fatal(err)
+	}
+	if got := replica.promotions(); got != 0 {
+		t.Fatalf("it failed over on first sight, without a round to confirm: %d", got)
+	}
+
+	if err := c.decide(t.Context(), nodes, "lk-litekvd-0"); err != nil {
+		t.Fatal(err)
+	}
+	if got := replica.promotions(); got != 1 {
+		t.Errorf("a fenced leader was made to sit out the grace period: %d promotions", got)
 	}
 }
 
@@ -217,6 +314,21 @@ func TestDryRunChangesNothing(t *testing.T) {
 	if len(f.patchedPods) != 0 {
 		t.Errorf("dry run patched pods: %v", f.patchedPods)
 	}
+
+	// Enlisting is the other thing it changes about a node, and it has a
+	// dry-run branch of its own. A stranded ex-leader must be found exactly as
+	// it was left, which is the whole point of watching a policy for a week
+	// before turning it on.
+	leader := node{pod: podAt("lk-litekvd-0", "10.0.0.9", nil),
+		status: &status{Role: "leader", Term: 1, Seq: 9, WaitFor: 1}}
+	stranded := node{pod: pods[1], status: &status{Role: "leader", Term: 0, Seq: 3, WaitFor: 1}}
+
+	if err := c.enlist(t.Context(), []node{leader, stranded}, &leader); err != nil {
+		t.Fatal(err)
+	}
+	if told := store.enlistments(); len(told) != 0 {
+		t.Errorf("dry run told a stranded leader to follow: %v", told)
+	}
 }
 
 // TestASlowNodeIsNotAnAnswer. A node that takes longer than the probe timeout
@@ -252,11 +364,18 @@ func TestASlowNodeIsNotAnAnswer(t *testing.T) {
 // left to promote.
 func TestAStrandedLeaderIsPutBackToWork(t *testing.T) {
 	stranded, strandedAt := newFakeStore(t, status{Role: "leader", Term: 0, Seq: 3, WaitFor: 1})
-	strandedHost, port := splitHostPort(t, strandedAt)
+	host, port := splitHostPort(t, strandedAt)
 
+	// All three pods carry the same address on purpose. The controller uses one
+	// port for every node, so anything it decides to enlist arrives at this one
+	// stand-in — which turns "it enlisted exactly one node" into an assertion
+	// instead of a hope. Give the other two an address nothing answers and a
+	// controller that enlisted the leader itself, or a replica that was already
+	// following, would look identical to one that did neither.
 	pods := []pod{
-		podAt("lk-litekvd-replica-0", "10.0.0.9", nil), // the current leader
-		podAt("lk-litekvd-0", strandedHost, nil),       // the stranded ex-leader
+		podAt("lk-litekvd-replica-0", host, nil), // the current leader
+		podAt("lk-litekvd-0", host, nil),         // the stranded ex-leader
+		podAt("lk-litekvd-replica-1", host, nil), // a replica, already following
 	}
 	_, srv, api := newFakeAPI(pods, "lk-litekvd-replica-0")
 	defer srv.Close()
@@ -267,15 +386,26 @@ func TestAStrandedLeaderIsPutBackToWork(t *testing.T) {
 	nodes := []node{
 		{pod: pods[0], status: &status{Role: "leader", Term: 1, Seq: 9, WaitFor: 1}},
 		{pod: pods[1], status: &status{Role: "leader", Term: 0, Seq: 3, WaitFor: 1}},
+		// On a lower term than the leader, which is what a replica looks like
+		// between a failover and catching up with it. That is the only state
+		// where "it is already a replica" is load-bearing: on the leader's own
+		// term the term check would refuse it anyway, and a test that used one
+		// would be testing the wrong guard.
+		{pod: pods[2], status: &status{Role: "replica", Term: 0, AppliedSeq: 9, WaitFor: 1,
+			Leader: "http://lk-litekvd-leader:8080"}},
 	}
 
 	if err := c.decide(t.Context(), nodes, "lk-litekvd-replica-0"); err != nil {
 		t.Fatal(err)
 	}
 
+	// Once, for the one node that needed it. Not the leader — being told to
+	// follow itself is precisely the self-follow that empties a store — and not
+	// the replica, which is already doing what it would be told to do.
 	told := stranded.enlistments()
 	if len(told) != 1 {
-		t.Fatalf("the stranded leader was told to follow %d times, want 1: %v", len(told), told)
+		t.Fatalf("it enlisted %d nodes, want 1 (the leader and the healthy replica are"+
+			" on this address too): %v", len(told), told)
 	}
 
 	// The Service, not the leader's pod IP. A pod IP pins it to whoever leads
@@ -293,27 +423,41 @@ func TestAStrandedLeaderIsPutBackToWork(t *testing.T) {
 // would take the cluster down rather than heal it. That is somebody's decision,
 // not a controller's.
 func TestANodeOnTheLeadersTermOrAboveIsLeftAlone(t *testing.T) {
-	rival, rivalAt := newFakeStore(t, status{Role: "leader", Term: 2, Seq: 9, WaitFor: 1})
-	rivalHost, port := splitHostPort(t, rivalAt)
+	// Both, because the boundary is the whole rule. Equal is the case that
+	// matters more and reads like the safe one: two nodes on term 1, and
+	// enlisting either against the other fences a leader that is doing nothing
+	// wrong. A sweep found the equal case untested.
+	for _, c := range []struct {
+		name string
+		term uint64
+	}{
+		{"on the leader's own term", 1},
+		{"on a term above the leader's", 2},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			rival, rivalAt := newFakeStore(t, status{Role: "leader", Term: c.term, Seq: 9, WaitFor: 1})
+			rivalHost, port := splitHostPort(t, rivalAt)
 
-	pods := []pod{
-		podAt("lk-litekvd-replica-0", "10.0.0.9", nil),
-		podAt("lk-litekvd-0", rivalHost, nil),
-	}
-	_, srv, api := newFakeAPI(pods, "lk-litekvd-replica-0")
-	defer srv.Close()
+			pods := []pod{
+				podAt("lk-litekvd-replica-0", "10.0.0.9", nil),
+				podAt("lk-litekvd-0", rivalHost, nil),
+			}
+			_, srv, api := newFakeAPI(pods, "lk-litekvd-replica-0")
+			defer srv.Close()
 
-	c := against(t, api, "controller-one")
-	c.port = port
+			ctl := against(t, api, "controller-one")
+			ctl.port = port
 
-	nodes := []node{
-		{pod: pods[0], status: &status{Role: "leader", Term: 1, Seq: 9, WaitFor: 1}},
-		{pod: pods[1], status: &status{Role: "leader", Term: 2, Seq: 9, WaitFor: 1}},
-	}
-	if err := c.decide(t.Context(), nodes, "lk-litekvd-replica-0"); err != nil {
-		t.Fatal(err)
-	}
-	if told := rival.enlistments(); len(told) != 0 {
-		t.Errorf("a node on a term above the leader's was enlisted anyway: %v", told)
+			nodes := []node{
+				{pod: pods[0], status: &status{Role: "leader", Term: 1, Seq: 9, WaitFor: 1}},
+				{pod: pods[1], status: &status{Role: "leader", Term: c.term, Seq: 9, WaitFor: 1}},
+			}
+			if err := ctl.decide(t.Context(), nodes, "lk-litekvd-replica-0"); err != nil {
+				t.Fatal(err)
+			}
+			if told := rival.enlistments(); len(told) != 0 {
+				t.Errorf("a node %s was enlisted against it anyway: %v", c.name, told)
+			}
+		})
 	}
 }

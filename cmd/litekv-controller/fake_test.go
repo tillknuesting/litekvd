@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,8 +28,53 @@ import (
 // So: a stand-in that behaves like the real thing where this program can tell
 // the difference, and in particular one that enforces resourceVersion on writes.
 // That is what makes "two controllers, only one acts" a test rather than a hope.
+// events is one ordered log shared by the stand-ins.
+//
+// Promoting a node and pointing the write Service at it are two calls to two
+// different servers, and each recorded only its own. So "promote first, then
+// move the traffic" — the one ordering constraint in the whole failover, since
+// the other way sends writes to a node that is still a replica and answers
+// every one of them 409 — was a comment above a test that could not see it. A
+// mutation swapping the two survived.
+type events struct {
+	mu sync.Mutex
+	at []string
+}
+
+func (e *events) note(what string) {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	e.at = append(e.at, what)
+}
+
+// before reports whether this happened and happened first. Both must have
+// happened: an ordering that holds because neither call was made is not an
+// ordering, and that is how this would go quiet if it ever stopped acting.
+func (e *events) before(this, that string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	i, j := slices.Index(e.at, this), slices.Index(e.at, that)
+	return i >= 0 && j >= 0 && i < j
+}
+
+func (e *events) String() string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	return strings.Join(e.at, " then ")
+}
+
 type fakeAPI struct {
 	mu sync.Mutex
+
+	// events, when a test is watching the order of things. Nil otherwise, and
+	// note tolerates that.
+	events *events
 
 	lease   *lease // nil until somebody creates it
 	version int    // bumped on every write, as etcd does
@@ -209,6 +255,9 @@ func (f *fakeAPI) services(w http.ResponseWriter, r *http.Request) {
 	for k, v := range body.Spec.Selector {
 		f.svc.Spec.Selector[k] = v
 		f.patchedServices = append(f.patchedServices, k+"="+v)
+		if k == podNameLabel {
+			f.events.note("the write Service points at " + v)
+		}
 	}
 	json.NewEncoder(w).Encode(f.svc)
 }
@@ -242,6 +291,11 @@ type fakeStore struct {
 	mu     sync.Mutex
 	status status
 
+	// name is what this node is called in the shared log, so that an ordering
+	// assertion names a pod rather than a port. Empty when nothing is watching.
+	name   string
+	events *events
+
 	// Every leader it was told to follow, in order.
 	followed []string
 
@@ -259,7 +313,16 @@ type fakeStore struct {
 func newFakeStore(t *testing.T, s status) (*fakeStore, string) {
 	t.Helper()
 
-	f := &fakeStore{status: s}
+	return newFakeStoreIn(t, s, "", nil)
+}
+
+// newFakeStoreIn is the same node, writing what it was asked to do into a log
+// it shares with the API server stand-in. For the tests that are about the
+// order of two calls rather than about either one of them.
+func newFakeStoreIn(t *testing.T, s status, name string, ev *events) (*fakeStore, string) {
+	t.Helper()
+
+	f := &fakeStore{status: s, name: name, events: ev}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -269,6 +332,7 @@ func newFakeStore(t *testing.T, s status) (*fakeStore, string) {
 			f.followed = append(f.followed, r.URL.Query().Get("leader"))
 			f.status.Role = "replica"
 			f.status.Leader = r.URL.Query().Get("leader")
+			f.events.note(f.name + " was told to follow")
 			json.NewEncoder(w).Encode(f.status)
 
 		case strings.HasSuffix(r.URL.Path, "/v1/promote"):
@@ -276,6 +340,7 @@ func newFakeStore(t *testing.T, s status) (*fakeStore, string) {
 			f.status.Role = "leader"
 			f.status.Term++
 			f.status.Leader = ""
+			f.events.note(f.name + " was promoted")
 			json.NewEncoder(w).Encode(map[string]uint64{"term": f.status.Term})
 		default:
 			json.NewEncoder(w).Encode(f.status)
